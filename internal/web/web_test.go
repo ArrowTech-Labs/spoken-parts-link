@@ -333,3 +333,51 @@ func TestChangedCertificateNeverOffersTrust(t *testing.T) {
 		t.Fatalf("remove printer: %q %q", f.removed, w.Header().Get("Location"))
 	}
 }
+
+var autofocusRe = regexp.MustCompile(`<input[^>]*\sautofocus[^>]*>`)
+
+func TestUnpairedPageLandsOnCodeEntry(t *testing.T) {
+	v := View{Phase: PhaseUnpaired, Notice: MsgTimedOut, Version: "0.1.1"}
+	v.Printers = activeView.Printers
+	_, _, h, _ := newServer(t, v)
+	page := do(h, "GET", "/", ingress, nil, nil).Body.String()
+	form := strings.Index(page, `action="/pair"`)
+	firstSection := strings.Index(page, "<section")
+	pairSection := strings.Index(page, `<section aria-labelledby="pair-h">`)
+	printersSection := strings.Index(page, `<section aria-labelledby="printers-h">`)
+	if form < 0 || pairSection < 0 || printersSection < 0 {
+		t.Fatalf("sections missing:\n%s", page)
+	}
+	if firstSection != pairSection || form > printersSection {
+		t.Fatal("code entry is not the first section, above the printers")
+	}
+	if strings.Contains(page[:pairSection], "<form") || strings.Contains(page[:pairSection], "<input") {
+		t.Fatal("another form comes before code entry")
+	}
+	inputs := autofocusRe.FindAllString(page, -1)
+	if len(inputs) != 1 || !strings.Contains(inputs[0], `name="code"`) || !strings.Contains(inputs[0], `id="pair-code"`) || !strings.Contains(inputs[0], `placeholder="K7P4-QX9M"`) {
+		t.Fatalf("want exactly the pairing code field autofocused, got %q", inputs)
+	}
+	text := html.UnescapeString(page)
+	for _, want := range []string{"Connect to Spoken Parts", "Enter the code from Spoken Parts", "Get the code in Spoken Parts: your building's Network setup step.", ">Connect</button>"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("page lacks %q", want)
+		}
+	}
+	if strings.Contains(page, "<script") {
+		t.Fatal("script tag in page")
+	}
+}
+
+func TestPairedAndPendingPagesHaveNoAutofocus(t *testing.T) {
+	for _, v := range []View{activeView, {Phase: PhasePending, CheckNumber: "0482", Printers: activeView.Printers}} {
+		_, _, h, _ := newServer(t, v)
+		page := do(h, "GET", "/", ingress, nil, nil).Body.String()
+		if strings.Contains(page, "autofocus") {
+			t.Errorf("%s page has an autofocused field", v.Phase)
+		}
+		if strings.Contains(page, `id="pair-code"`) || strings.Contains(page, `action="/pair"`) {
+			t.Errorf("%s page shows the code entry form", v.Phase)
+		}
+	}
+}

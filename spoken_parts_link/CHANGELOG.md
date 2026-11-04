@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.1
+
+- The link page opens on the code field until the link is connected. The
+  field is ready to type in, and the printers list is below it.
+- A short hint under the code field says where to get the code in Spoken
+  Parts.
+- The docs explain how to turn on "Show in sidebar" and where to enter the
+  code.
+
 ## 0.1.0
 
 First test release (experimental).
