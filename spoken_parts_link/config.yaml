@@ -1,0 +1,32 @@
+# Home Assistant app (add-on) configuration for Spoken Parts Link.
+# Reference: https://developers.home-assistant.io/docs/add-ons/configuration
+name: "Spoken Parts Link"
+version: "0.1.0"
+slug: spoken_parts_link
+description: "Shows the status of your Bambu Lab printers in Spoken Parts."
+url: "https://github.com/ArrowTech-Labs/spoken-parts-link"
+arch:
+  - aarch64
+  - amd64
+# Prebuilt multi-arch image; the tag is the version above.
+image: "ghcr.io/arrowtech-labs/spoken-parts-link"
+startup: application
+boot: auto
+stage: experimental
+init: false
+ingress: true
+ingress_port: 8099
+ingress_stream: false
+panel_icon: mdi:printer-3d
+panel_title: "Spoken Parts"
+panel_admin: true
+# Needed to hear the printers' discovery broadcasts on UDP port 2021.
+# The link page still listens only on the Supervisor address.
+host_network: true
+apparmor: true
+watchdog: "http://[HOST]:[PORT:8099]/healthz"
+backup: hot
+options:
+  log_level: info
+schema:
+  log_level: "list(debug|info|warning|error)"

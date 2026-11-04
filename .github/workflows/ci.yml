@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Format, vet, test, vulnerabilities
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.3"
+          cache: false
+      - name: gofmt
+        run: |
+          out="$(gofmt -l .)"
+          if [ -n "$out" ]; then
+            echo "These files need gofmt:"
+            echo "$out"
+            exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+      - name: go test
+        run: go test -race ./...
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+          "$(go env GOPATH)/bin/govulncheck" ./...
+      - name: No em or en dashes in customer text
+        env:
+          LC_ALL: C.UTF-8
+        run: |
+          if grep -rnP '[\x{2013}\x{2014}]' spoken_parts_link internal/web README.md SECURITY.md THREAT-MODEL.md; then
+            echo "::error::Customer text must not use em or en dashes."
+            exit 1
+          fi
+      - name: App config sanity
+        run: go test -v -run 'TestConfigYAML|TestAppArmorProfile|TestDockerfile|TestCustomerText' ./internal/repocheck
+
+  reproducible:
+    name: Reproducible build (${{ matrix.arch }})
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.3"
+          cache: false
+      - name: Build twice and compare
+        env:
+          GOARCH: ${{ matrix.arch }}
+          GOOS: linux
+          CGO_ENABLED: "0"
+        run: |
+          build() {
+            GOCACHE="$(mktemp -d)" go build -trimpath -buildvcs=false \
+              -ldflags "-s -w -buildid= -X main.version=ci" \
+              -o "$1/spoken-parts-link" ./cmd/spoken-parts-link
+          }
+          build out-a
+          build out-b
+          sha256sum out-a/spoken-parts-link out-b/spoken-parts-link
+          cmp out-a/spoken-parts-link out-b/spoken-parts-link
+
+  docker:
+    name: Docker build (no push)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          # BuildKit runs privileged and does the build, so pin it by digest.
+          # This is moby/buildkit:buildx-stable-1 as of 2026-11-04. Dependabot
+          # does not bump driver-opts: check for a new release monthly.
+          driver-opts: image=moby/buildkit:v0.34.2@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: spoken_parts_link/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          build-args: VERSION=ci
+          push: false

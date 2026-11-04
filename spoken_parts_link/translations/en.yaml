@@ -1,0 +1,6 @@
+configuration:
+  log_level:
+    name: Log level
+    description: >-
+      How much the app writes to its log. Use "info" unless support asks for
+      "debug". Access codes and keys are never written to the log.

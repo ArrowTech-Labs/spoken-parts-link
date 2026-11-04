@@ -1,0 +1,134 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions: {}
+
+jobs:
+  release:
+    name: Build, sign and publish
+    runs-on: ubuntu-24.04
+    # Needs a maintainer's approval (set required reviewers on this environment).
+    environment: release
+    permissions:
+      contents: write # create the GitHub release
+      packages: write # push to ghcr.io
+      id-token: write # keyless cosign signing and attestations
+      attestations: write
+    env:
+      IMAGE: ghcr.io/arrowtech-labs/spoken-parts-link
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check the tag matches the app version
+        id: version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#v}"
+          config="$(sed -n 's/^version: *"\{0,1\}\([^"]*\)"\{0,1\} *$/\1/p' spoken_parts_link/config.yaml)"
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Tag $TAG is not vX.Y.Z"
+            exit 1
+          fi
+          if [ "$version" != "$config" ]; then
+            echo "::error::Tag $TAG does not match spoken_parts_link/config.yaml version $config"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.3"
+          cache: false
+      - name: Test
+        run: go test -race ./...
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          # BuildKit runs privileged and does the build, so pin it by digest.
+          # This is moby/buildkit:buildx-stable-1 as of 2026-11-04. Dependabot
+          # does not bump driver-opts: check for a new release monthly.
+          driver-opts: image=moby/buildkit:v0.34.2@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Reproducible timestamps
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
+
+      - name: Build and push the multi-arch image
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: spoken_parts_link/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          build-args: VERSION=${{ steps.version.outputs.version }}
+          tags: ${{ env.IMAGE }}:${{ steps.version.outputs.version }}
+          push: true
+          provenance: mode=max
+          sbom: true
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Sign the image (keyless)
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Make the SBOM
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Attest the SBOM
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          sbom-path: sbom.spdx.json
+          push-to-registry: true
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ steps.version.outputs.version }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          REPO: ${{ github.repository }}
+        run: |
+          {
+            echo "Spoken Parts Link ${VERSION}"
+            echo
+            echo "Image: \`${IMAGE}:${VERSION}\`"
+            echo
+            echo "Digest: \`${DIGEST}\`"
+            echo
+            echo "Check the signature:"
+            echo
+            echo '```'
+            echo "cosign verify ${IMAGE}@${DIGEST} --certificate-identity-regexp '^https://github.com/ArrowTech-Labs/spoken-parts-link/.github/workflows/release.yml@refs/tags/v' --certificate-oidc-issuer https://token.actions.githubusercontent.com"
+            echo "gh attestation verify oci://${IMAGE}@${DIGEST} --owner ArrowTech-Labs"
+            echo '```'
+            echo
+            echo "See spoken_parts_link/CHANGELOG.md for what changed."
+          } > notes.md
+          gh release create "$TAG" --repo "$REPO" --verify-tag \
+            --title "Spoken Parts Link ${VERSION}" --notes-file notes.md sbom.spdx.json

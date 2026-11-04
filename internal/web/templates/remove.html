@@ -1,0 +1,13 @@
+{{template "head" .}}
+<section aria-labelledby="confirm-h">
+<h2 id="confirm-h">Remove this link?</h2>
+<p>This removes the link from this Home Assistant. Saved printer access codes are deleted here. It stops working right away.</p>
+<p>Also remove it in Spoken Parts, on your site's Network setup page.</p>
+<form method="post" action="{{.Base}}/remove">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<input type="hidden" name="confirm" value="yes">
+<button type="submit" class="danger">Remove</button>
+<a class="btn btn2" href="{{.Base}}/">Cancel</a>
+</form>
+</section>
+{{template "foot" .}}

@@ -1,0 +1,21 @@
+{{define "head"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+{{if .Refresh}}<meta http-equiv="refresh" content="5">{{end}}
+<title>Spoken Parts Link</title>
+<style>{{.CSS}}</style>
+</head>
+<body>
+<main>
+<h1>Spoken Parts Link</h1>
+{{if .Msg}}<p class="note {{if .Msg.Good}}ok{{else}}warn{{end}}" role="status">{{.Msg.Text}}</p>{{end}}
+{{end}}
+
+{{define "foot"}}
+<footer>Spoken Parts Link {{.Version}}. Status only: it reads printer status and never starts a print.</footer>
+</main>
+</body>
+</html>
+{{end}}

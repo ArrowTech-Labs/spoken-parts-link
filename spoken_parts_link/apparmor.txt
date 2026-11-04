@@ -1,0 +1,68 @@
+#include <tunables/global>
+
+# AppArmor profile for Spoken Parts Link. The Supervisor renames this profile
+# to the app ID, so it is named after the slug.
+profile spoken_parts_link flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/base>
+
+  # Start up runs as root only long enough to give /data/identity,
+  # /data/secrets and /data/state to uid 65532, then switches to it for good.
+  capability chown,
+  capability fowner,
+  capability dac_override,
+  capability setuid,
+  capability setgid,
+
+  # HTTPS to Spoken Parts, MQTT over TLS to printers, the discovery listener
+  # on UDP 2021 and the ingress page. Go lists interfaces over netlink.
+  network inet stream,
+  network inet dgram,
+  network inet6 stream,
+  network inet6 dgram,
+  network netlink raw,
+
+  # Never needed.
+  deny network inet raw,
+  deny network inet6 raw,
+  deny network packet,
+  deny ptrace,
+  deny mount,
+  deny umount,
+  deny pivot_root,
+  deny capability sys_admin,
+  deny capability sys_module,
+  deny capability sys_ptrace,
+  deny capability sys_rawio,
+  deny capability net_admin,
+  deny capability net_raw,
+  deny capability bpf,
+
+  # Stop signals from the container runtime, and the Go runtime's own signals.
+  signal (receive) peer=unconfined,
+  signal (send, receive) peer=spoken_parts_link,
+  signal (send, receive) peer=*_spoken_parts_link,
+
+  # The program, CA certificates and name resolution files.
+  /usr/bin/spoken-parts-link mr,
+  /etc/ssl/certs/ca-certificates.crt r,
+  /etc/hosts r,
+  /etc/resolv.conf r,
+  /etc/nsswitch.conf r,
+  /etc/hostname r,
+
+  # Read by the Go runtime at start.
+  /sys/kernel/mm/transparent_hugepage/hpage_pmd_size r,
+  /sys/fs/cgroup/** r,
+  @{PROC}/sys/net/core/somaxconn r,
+  @{PROC}/@{pid}/cgroup r,
+  @{PROC}/@{pid}/mountinfo r,
+  @{PROC}/@{pid}/stat r,
+
+  # The app's private data folder (options, key, encrypted codes, state).
+  /data/ r,
+  /data/** rwk,
+  /tmp/ r,
+  /tmp/** rwk,
+
+  # No exec rules: the profile allows running no other program.
+}
