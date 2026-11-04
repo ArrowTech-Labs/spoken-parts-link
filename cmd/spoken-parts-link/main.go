@@ -29,7 +29,7 @@ import (
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
-var version = "0.1.0-dev"
+var version = "0.1.1-dev"
 
 // The unprivileged user the link runs as after start.
 const (

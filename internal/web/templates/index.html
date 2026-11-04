@@ -4,11 +4,11 @@
 {{if eq .Phase "unpaired"}}
 <section aria-labelledby="pair-h">
 <h2 id="pair-h">Connect to Spoken Parts</h2>
-<p>Enter the code from Spoken Parts. Find it on your site's Network setup page.</p>
 <form method="post" action="{{.Base}}/pair">
 <input type="hidden" name="csrf" value="{{.CSRF}}">
 <label for="pair-code">Enter the code from Spoken Parts</label>
-<input type="text" id="pair-code" name="code" required autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="12" placeholder="K7P4-QX9M">
+<input type="text" id="pair-code" name="code" required autofocus autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="12" placeholder="K7P4-QX9M" aria-describedby="pair-hint">
+<p class="mut" id="pair-hint">Get the code in Spoken Parts: your building's Network setup step.</p>
 <div><button type="submit">Connect</button></div>
 </form>
 </section>

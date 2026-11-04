@@ -39,13 +39,23 @@ Raspberry Pi.
    Repositories and add `https://github.com/ArrowTech-Labs/spoken-parts-link`.
 3. Find Spoken Parts Link in the list and install it.
 4. Turn on "Start on boot" and "Watchdog". Then start it.
-5. Open it with "Open web UI", or pick Spoken Parts in the sidebar.
 
-## Connect it to Spoken Parts
+## Open the link
 
-1. In Spoken Parts, open your site's Network setup page and get a code.
-2. On the link page in Home Assistant, type the code and tap Connect. The code
-   works for 10 minutes.
+1. In Home Assistant, go to Settings, then Apps (Add-ons on older Home
+   Assistant), then Spoken Parts Link.
+2. Turn on "Show in sidebar". The app can't turn this on for you.
+3. Pick Spoken Parts in the sidebar. Or tap "Open web UI" on the app's page.
+
+Until the link is connected, the code field is at the top of the page and
+ready to type in.
+
+## Enter your code
+
+1. In Spoken Parts, open your building and go to the Network setup step. Get a
+   code there.
+2. On the link page in Home Assistant, paste or type the code in "Enter the
+   code from Spoken Parts" and tap Connect. The code works for 10 minutes.
 3. The link page shows a 4 digit check number. Spoken Parts shows a number too.
 4. If the two numbers are the same, confirm in Spoken Parts. If they are not the
    same, do not confirm. Get a new code instead.
@@ -170,11 +180,11 @@ This is optional. Every release image is signed by our GitHub release workflow.
 To check it yourself, install cosign and the GitHub CLI, then run:
 
 ```
-cosign verify ghcr.io/arrowtech-labs/spoken-parts-link:0.1.0 --certificate-identity-regexp '^https://github.com/ArrowTech-Labs/spoken-parts-link/.github/workflows/release.yml@refs/tags/v' --certificate-oidc-issuer https://token.actions.githubusercontent.com
+cosign verify ghcr.io/arrowtech-labs/spoken-parts-link:0.1.1 --certificate-identity-regexp '^https://github.com/ArrowTech-Labs/spoken-parts-link/.github/workflows/release.yml@refs/tags/v' --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
 ```
-gh attestation verify oci://ghcr.io/arrowtech-labs/spoken-parts-link:0.1.0 --owner ArrowTech-Labs
+gh attestation verify oci://ghcr.io/arrowtech-labs/spoken-parts-link:0.1.1 --owner ArrowTech-Labs
 ```
 
 Both commands should say the check passed. Home Assistant itself does not check
