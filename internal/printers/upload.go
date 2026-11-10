@@ -176,11 +176,17 @@ func (m *Manager) UploadClean(ctx context.Context, serial, name string, r io.Rea
 	if err != nil {
 		return nil, nil // uploaded and checked by size; the list is only a check
 	}
+	foreign := 0
 	for _, e := range entries {
-		if !e.Dir && e.Name != name && FileNameRe.MatchString(e.Name) {
+		switch {
+		case e.Dir || e.Name == name:
+		case FileNameRe.MatchString(e.Name):
 			others = append(others, e.Name)
+		default:
+			foreign++ // not ours: never touched, and not named in the log
 		}
 	}
+	m.cfg.Log.Info("printer storage after the upload", "serial_tail", tail, "file", name, "other_sp_files", len(others), "other_files", foreign)
 	return others, nil
 }
 
