@@ -196,6 +196,10 @@ func newMonitorWorld(t *testing.T) *monitorWorld {
 		p := w.h.app.View().Printers[0]
 		return p.Access == printers.AccessOK && p.Connected && p.GcodeState == "FINISH"
 	})
+	// The monitor must have seen the first report (the baseline) before the
+	// replay starts, or the start of the print is not a change.
+	t0 := w.h.app.monitor.Ticks()
+	waitFor(t, "baseline", func() bool { return w.h.app.monitor.Ticks() >= t0+2 })
 	t.Cleanup(func() { w.h.stop() })
 	return w
 }
