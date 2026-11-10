@@ -75,6 +75,9 @@ type backend struct {
 	// throttlePair makes POST pair answer 429 with Retry-After.
 	throttlePair bool
 	pairCalls    int
+	// extra answers routes the base fake does not know (sends, events).
+	// It runs with b.mu held, after the signature check.
+	extra func(w http.ResponseWriter, r *http.Request, body []byte, link *fakeLink) bool
 }
 
 func newBackend(t *testing.T) *backend {
@@ -199,6 +202,9 @@ func (b *backend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte(`{"next_sync_s":5,"paused":false,"status":"active","site":{"id":4,"name":"Gilbert"},"company":{"name":"Spoken Parts"},"sends":[],"cancel":[],"commands":[]}`))
 		}
 	default:
+		if b.extra != nil && link != nil && b.extra(w, r, body, link) {
+			return
+		}
 		b.fail(w, 404, "not_found")
 	}
 }
@@ -270,6 +276,7 @@ type harness struct {
 	cancel  context.CancelFunc
 	done    chan struct{}
 	ssdp    *ssdp.Listener
+	stopped bool
 }
 
 func newHarness(t *testing.T, dir string, be *backend, srv *httptest.Server, broker *testutil.Broker, ca *testutil.CA, logs *lockedBuf, mods ...func(*Config)) *harness {
@@ -331,6 +338,10 @@ func newHarness(t *testing.T, dir string, be *backend, srv *httptest.Server, bro
 }
 
 func (h *harness) stop() {
+	if h.stopped {
+		return
+	}
+	h.stopped = true
 	h.cancel()
 	<-h.done
 	h.app.Close()

@@ -1,0 +1,404 @@
+package printers
+
+import (
+	"encoding/json"
+	"fmt"
+	"sort"
+	"strconv"
+	"strings"
+)
+
+// Tray is one AMS slot as the printer last reported it.
+type Tray struct {
+	AmsID  int    // 0..3 for AMS units, 128.. for AMS HT
+	SlotID int    // 0..3
+	Type   string // "" for an empty slot
+	Color  string // "#RRGGBB" or ""
+	// Nozzle is the nozzle this AMS feeds on a two nozzle printer: "left",
+	// "right", or "" (one nozzle, or not known).
+	Nozzle string
+	feeds  int // extruder id from the AMS info bits, -1 unknown
+}
+
+// Nozzle is one nozzle as the printer last reported it.
+type Nozzle struct {
+	ID       int
+	Side     string // "left" or "right" on two nozzle printers, else ""
+	Diameter string // "0.4"
+	Type     string
+}
+
+// CommandResult is the printer's answer to a command we sent.
+type CommandResult struct {
+	Command string
+	Result  string
+	Reason  string
+	ErrCode int
+}
+
+// Refused reports whether the printer said no (for example "mqtt message
+// verify failed" from a printer that needs Bambu's authorization).
+func (c CommandResult) Refused() bool {
+	r := strings.ToLower(c.Result)
+	return r == "fail" || r == "failed" || c.ErrCode != 0
+}
+
+// HMS severity, from the code's upper 16 bits (1 fatal, 2 serious).
+const (
+	hmsFatal   = 1
+	hmsSerious = 2
+)
+
+// liveUpdate is the job, storage, AMS and nozzle part of one report.
+type liveUpdate struct {
+	layer      *int
+	total      *int
+	subtask    *string
+	gcodeFile  *string
+	printError *int
+	hms        []string
+	hmsKnown   bool
+	hmsFatal   bool
+	storage    *bool
+	trays      []trayUpdate
+	trayNow    *int
+	mapping    []int
+	mapKnown   bool
+	nozzles    []Nozzle
+	command    *CommandResult
+}
+
+type trayUpdate struct {
+	amsID, slotID int
+	feeds         int
+	typ           *string
+	color         *string
+}
+
+func parseLive(payload []byte) (liveUpdate, bool) {
+	var msg struct {
+		Print *struct {
+			LayerNum   *json.RawMessage `json:"layer_num"`
+			TotalLayer *json.RawMessage `json:"total_layer_num"`
+			Subtask    *string          `json:"subtask_name"`
+			GcodeFile  *string          `json:"gcode_file"`
+			PrintError *json.RawMessage `json:"print_error"`
+			HMS        *[]struct {
+				Attr int64 `json:"attr"`
+				Code int64 `json:"code"`
+			} `json:"hms"`
+			SDCard   *bool            `json:"sdcard"`
+			HomeFlag *json.RawMessage `json:"home_flag"`
+			Mapping  *[]int           `json:"mapping"`
+			Command  string           `json:"command"`
+			Result   string           `json:"result"`
+			Reason   string           `json:"reason"`
+			ErrCode  *json.RawMessage `json:"err_code"`
+			Nozzle   *json.RawMessage `json:"nozzle_diameter"`
+			AMS      *struct {
+				AMS []struct {
+					ID   json.RawMessage              `json:"id"`
+					Info string                       `json:"info"`
+					Tray []map[string]json.RawMessage `json:"tray"`
+				} `json:"ams"`
+				TrayNow *json.RawMessage `json:"tray_now"`
+			} `json:"ams"`
+			Device *struct {
+				Nozzle *struct {
+					Info []struct {
+						ID       int              `json:"id"`
+						Diameter *json.RawMessage `json:"diameter"`
+						Type     string           `json:"type"`
+					} `json:"info"`
+				} `json:"nozzle"`
+				Storage *[]struct {
+					Name string `json:"name"`
+				} `json:"storage"`
+			} `json:"device"`
+		} `json:"print"`
+	}
+	var u liveUpdate
+	if err := json.Unmarshal(payload, &msg); err != nil || msg.Print == nil {
+		return u, err == nil
+	}
+	p := msg.Print
+	if n, ok := flexInt(p.LayerNum); ok && n >= 0 {
+		u.layer = &n
+	}
+	if n, ok := flexInt(p.TotalLayer); ok && n >= 0 {
+		u.total = &n
+	}
+	if p.Subtask != nil {
+		s := cleanText(*p.Subtask, 120)
+		u.subtask = &s
+	}
+	if p.GcodeFile != nil {
+		s := cleanText(*p.GcodeFile, 200)
+		u.gcodeFile = &s
+	}
+	if n, ok := flexInt(p.PrintError); ok {
+		u.printError = &n
+	}
+	if p.HMS != nil {
+		u.hmsKnown = true
+		for _, h := range *p.HMS {
+			if len(u.hms) >= 20 {
+				break
+			}
+			a, c := uint32(h.Attr), uint32(h.Code)
+			u.hms = append(u.hms, fmt.Sprintf("HMS_%04X_%04X_%04X_%04X", a>>16, a&0xFFFF, c>>16, c&0xFFFF))
+			if c>>16 == hmsFatal || c>>16 == hmsSerious {
+				u.hmsFatal = true
+			}
+		}
+	}
+	// Storage: sdcard, else home_flag bits 8-9 (0 none, 1 normal, 2 abnormal,
+	// 3 read only), else a "usb" entry in device.storage on newer firmware.
+	switch {
+	case p.SDCard != nil:
+		v := *p.SDCard
+		u.storage = &v
+	case p.HomeFlag != nil:
+		if n, ok := flexInt(p.HomeFlag); ok {
+			v := (n>>8)&0x3 == 1
+			u.storage = &v
+		}
+	}
+	if p.Device != nil && p.Device.Storage != nil && u.storage == nil {
+		v := false
+		for _, s := range *p.Device.Storage {
+			if strings.EqualFold(s.Name, "usb") || strings.EqualFold(s.Name, "sdcard") {
+				v = true
+			}
+		}
+		u.storage = &v
+	}
+	if p.Mapping != nil {
+		u.mapKnown = true
+		for i, v := range *p.Mapping {
+			if i >= 64 {
+				break
+			}
+			u.mapping = append(u.mapping, v)
+		}
+	}
+	if p.Command != "" && p.Command != "push_status" && (p.Result != "" || p.ErrCode != nil) {
+		c := CommandResult{Command: cleanText(p.Command, 40), Result: cleanText(p.Result, 40), Reason: cleanText(p.Reason, 120)}
+		if n, ok := flexInt(p.ErrCode); ok {
+			c.ErrCode = n
+		}
+		u.command = &c
+	}
+	if p.AMS != nil {
+		if n, ok := flexInt(p.AMS.TrayNow); ok && n >= 0 && n <= 255 {
+			u.trayNow = &n
+		}
+		for _, unit := range p.AMS.AMS {
+			id, ok := flexInt((*json.RawMessage)(&unit.ID))
+			if !ok || id < 0 || id > 255 {
+				continue
+			}
+			feeds := -1
+			if info, err := strconv.ParseUint(strings.TrimSpace(unit.Info), 16, 32); err == nil {
+				feeds = int(info>>8) & 0xF
+			}
+			for _, tr := range unit.Tray {
+				rawID, ok := tr["id"]
+				slot, ok2 := flexInt(&rawID)
+				if !ok || !ok2 || slot < 0 || slot > 3 {
+					continue
+				}
+				t := trayUpdate{amsID: id, slotID: slot, feeds: feeds}
+				if raw, ok := tr["tray_type"]; ok {
+					var s string
+					_ = json.Unmarshal(raw, &s)
+					s = cleanText(s, 20)
+					t.typ = &s
+				} else if len(tr) == 1 {
+					empty := "" // only an id: the slot is empty
+					t.typ = &empty
+				}
+				if raw, ok := tr["tray_color"]; ok {
+					var s string
+					_ = json.Unmarshal(raw, &s)
+					c := trayColor(s)
+					t.color = &c
+				}
+				u.trays = append(u.trays, t)
+			}
+		}
+	}
+	if p.Device != nil && p.Device.Nozzle != nil {
+		for _, n := range p.Device.Nozzle.Info {
+			if n.ID < 0 || n.ID > 7 {
+				continue
+			}
+			u.nozzles = append(u.nozzles, Nozzle{ID: n.ID, Diameter: diameter(n.Diameter), Type: cleanText(n.Type, 20)})
+		}
+	} else if d := diameter(p.Nozzle); d != "" {
+		u.nozzles = []Nozzle{{ID: 0, Diameter: d}}
+	}
+	return u, true
+}
+
+// trayColor turns "RRGGBBAA" into "#RRGGBB".
+func trayColor(s string) string {
+	s = strings.TrimPrefix(strings.TrimSpace(s), "#")
+	if len(s) != 6 && len(s) != 8 {
+		return ""
+	}
+	if _, err := strconv.ParseUint(s, 16, 32); err != nil {
+		return ""
+	}
+	return "#" + strings.ToUpper(s[:6])
+}
+
+func diameter(raw *json.RawMessage) string {
+	if raw == nil {
+		return ""
+	}
+	var f float64
+	if err := json.Unmarshal(*raw, &f); err != nil {
+		var s string
+		if json.Unmarshal(*raw, &s) != nil {
+			return ""
+		}
+		if f, err = strconv.ParseFloat(strings.TrimSpace(s), 64); err != nil {
+			return ""
+		}
+	}
+	if f <= 0 || f > 5 {
+		return ""
+	}
+	return strconv.FormatFloat(f, 'f', -1, 64)
+}
+
+// cleanText keeps printable characters only and caps the length.
+func cleanText(s string, max int) string {
+	var b strings.Builder
+	for _, r := range s {
+		if b.Len() >= max {
+			break
+		}
+		if r >= 0x20 && r != 0x7f {
+			b.WriteRune(r)
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// live is what a printer last reported about its job, storage, AMS and nozzles.
+type live struct {
+	layer, total *int
+	subtask      string
+	gcodeFile    string
+	printError   int
+	hms          []string
+	hmsFatal     bool
+	storage      *bool
+	trays        map[[2]int]Tray
+	trayNow      *int
+	mapping      []int
+	nozzles      map[int]Nozzle
+	command      *CommandResult
+	commandSeq   int
+}
+
+func (l *live) apply(u liveUpdate) {
+	if u.layer != nil {
+		l.layer = u.layer
+	}
+	if u.total != nil {
+		l.total = u.total
+	}
+	if u.subtask != nil {
+		l.subtask = *u.subtask
+	}
+	if u.gcodeFile != nil {
+		l.gcodeFile = *u.gcodeFile
+	}
+	if u.printError != nil {
+		l.printError = *u.printError
+	}
+	if u.hmsKnown {
+		l.hms, l.hmsFatal = u.hms, u.hmsFatal
+	}
+	if u.storage != nil {
+		l.storage = u.storage
+	}
+	if u.trayNow != nil {
+		l.trayNow = u.trayNow
+	}
+	if u.mapKnown {
+		l.mapping = u.mapping
+	}
+	if l.trays == nil {
+		l.trays = map[[2]int]Tray{}
+	}
+	for _, t := range u.trays {
+		key := [2]int{t.amsID, t.slotID}
+		cur, ok := l.trays[key]
+		if !ok {
+			cur = Tray{AmsID: t.amsID, SlotID: t.slotID}
+		}
+		cur.feeds = t.feeds
+		if t.typ != nil {
+			cur.Type = *t.typ
+			if cur.Type == "" {
+				cur.Color = ""
+			}
+		}
+		if t.color != nil && cur.Type != "" {
+			cur.Color = *t.color
+		}
+		l.trays[key] = cur
+	}
+	if len(u.nozzles) > 0 {
+		l.nozzles = map[int]Nozzle{}
+		for _, n := range u.nozzles {
+			l.nozzles[n.ID] = n
+		}
+	}
+	if u.command != nil {
+		c := *u.command
+		l.command = &c
+		l.commandSeq++
+	}
+}
+
+// sideOf names a nozzle on a two nozzle printer (id 0 is the right one).
+func sideOf(id int, twoNozzles bool) string {
+	if !twoNozzles {
+		return ""
+	}
+	switch id {
+	case 0:
+		return "right"
+	case 1:
+		return "left"
+	}
+	return ""
+}
+
+func (l *live) snapshot() (trays []Tray, nozzles []Nozzle) {
+	two := len(l.nozzles) == 2
+	for _, n := range l.nozzles {
+		n.Side = sideOf(n.ID, two)
+		nozzles = append(nozzles, n)
+	}
+	sort.Slice(nozzles, func(i, j int) bool { return nozzles[i].ID < nozzles[j].ID })
+	for _, t := range l.trays {
+		t.Nozzle = ""
+		if two && t.feeds >= 0 {
+			t.Nozzle = sideOf(t.feeds, true)
+		}
+		trays = append(trays, t)
+	}
+	sort.Slice(trays, func(i, j int) bool {
+		if trays[i].AmsID != trays[j].AmsID {
+			return trays[i].AmsID < trays[j].AmsID
+		}
+		return trays[i].SlotID < trays[j].SlotID
+	})
+	return trays, nozzles
+}

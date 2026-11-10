@@ -6,8 +6,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +18,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -102,6 +105,7 @@ func ParseServer(raw string) (*url.URL, error) {
 type Client struct {
 	base      *url.URL
 	http      *http.Client
+	download  *http.Client // no overall timeout: files can be large
 	userAgent string
 	now       func() time.Time
 }
@@ -127,13 +131,17 @@ func New(base *url.URL, version string) *Client {
 			// https. Never follow one.
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
+		download: &http.Client{
+			Transport:     tr,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
 		userAgent: "spoken-parts-link/" + version,
 		now:       time.Now,
 	}
 }
 
 // SetHTTPClient replaces the HTTP client (tests).
-func (c *Client) SetHTTPClient(h *http.Client) { c.http = h }
+func (c *Client) SetHTTPClient(h *http.Client) { c.http, c.download = h, h }
 
 // Site and Company appear in status and sync answers.
 type Site struct {
@@ -186,6 +194,33 @@ type SyncPrinter struct {
 	Percent         *int   `json:"percent"`
 	RemainingMin    *int   `json:"remaining_min"`
 	CertFingerprint string `json:"cert_fingerprint"`
+
+	// 0.2: what the swap steps are checked against, and the job.
+	Storage     *bool        `json:"storage"`
+	AMS         []SyncTray   `json:"ams,omitempty"`
+	Nozzles     []SyncNozzle `json:"nozzles,omitempty"`
+	SubtaskName string       `json:"subtask_name,omitempty"`
+	GcodeFile   string       `json:"gcode_file,omitempty"`
+	Layer       *int         `json:"layer,omitempty"`
+	TotalLayers *int         `json:"total_layers,omitempty"`
+	TrayNow     *int         `json:"tray_now,omitempty"`
+	CanStart    string       `json:"can_start,omitempty"`
+}
+
+// SyncTray is one AMS slot in a sync request.
+type SyncTray struct {
+	AmsID  int    `json:"ams_id"`
+	SlotID int    `json:"slot_id"`
+	Type   string `json:"type"`
+	Color  string `json:"color"`
+	Nozzle string `json:"nozzle"`
+}
+
+// SyncNozzle is one nozzle in a sync request.
+type SyncNozzle struct {
+	Side     string `json:"side"`
+	Diameter string `json:"diameter"`
+	Type     string `json:"type"`
 }
 
 // SyncRequest is the body of POST sync.
@@ -205,6 +240,174 @@ type SyncResponse struct {
 	Sends     []json.RawMessage `json:"sends"`
 	Cancel    []json.RawMessage `json:"cancel"`
 	Commands  []json.RawMessage `json:"commands"`
+	// 0.2: sends waiting for this link, and how each printer may start.
+	SendsWaiting int               `json:"sends_waiting"`
+	CanStart     map[string]string `json:"can_start"`
+}
+
+// MapRow is one filament of a send's plan: the AMS slot it prints from.
+type MapRow struct {
+	Filament int    `json:"filament"`
+	Material string `json:"material"`
+	Color    string `json:"color"`
+	AmsID    int    `json:"ams_id"`
+	SlotID   int    `json:"slot_id"`
+	Nozzle   string `json:"nozzle"`
+	Tray     int    `json:"tray"`
+}
+
+// SendPrinter is the printer a send is for.
+type SendPrinter struct {
+	Number    int    `json:"number"`
+	Name      string `json:"name"`
+	Serial    string `json:"serial"`
+	Model     string `json:"model"`
+	ModelCode string `json:"model_code"`
+}
+
+// SendOptions are the print options for an auto start.
+type SendOptions struct {
+	Timelapse     bool `json:"timelapse"`
+	BedLeveling   bool `json:"bed_levelling"`
+	FlowCali      bool `json:"flow_cali"`
+	VibrationCali bool `json:"vibration_cali"`
+	LayerInspect  bool `json:"layer_inspect"`
+	UseAMS        bool `json:"use_ams"`
+}
+
+// Send is one print Spoken Parts sent to a printer of this link.
+type Send struct {
+	ID          string      `json:"id"`
+	State       string      `json:"state"`
+	LinkState   string      `json:"link_state"`
+	AgeS        int         `json:"age_s"`
+	Printer     SendPrinter `json:"printer"`
+	PlateIndex  int         `json:"plate_index"`
+	FileName    string      `json:"file_name"`
+	SubtaskName string      `json:"subtask_name"`
+	SHA256      string      `json:"sha256"`
+	Mapping     []MapRow    `json:"mapping"`
+	AutoStart   bool        `json:"autostart"`
+	Options     SendOptions `json:"options"`
+	FileURL     string      `json:"file_url"`
+	FileToken   string      `json:"file_token"`
+}
+
+// StateRequest is the body of POST sends/<id>/state.
+type StateRequest struct {
+	State       string     `json:"state"`
+	Percent     *int       `json:"percent,omitempty"`
+	FileName    string     `json:"file_name,omitempty"`
+	Code        string     `json:"code,omitempty"`
+	Reason      string     `json:"reason,omitempty"`
+	SHA256      string     `json:"sha256,omitempty"`
+	SubtaskName string     `json:"subtask_name,omitempty"`
+	Alert       *SendAlert `json:"alert,omitempty"`
+}
+
+// SendAlert is a problem after the start that a person must act on.
+type SendAlert struct {
+	Kind   string `json:"kind"`
+	Detail string `json:"detail"`
+}
+
+// Event is one progress event of a send, in order. Key makes it idempotent.
+type Event struct {
+	Key          string   `json:"key"`
+	SendID       string   `json:"send_id"`
+	ObservedAt   string   `json:"observed_at"`
+	GcodeState   string   `json:"gcode_state"`
+	Percent      *int     `json:"percent,omitempty"`
+	Layer        *int     `json:"layer,omitempty"`
+	TotalLayers  *int     `json:"total_layers,omitempty"`
+	RemainingMin *int     `json:"remaining_min,omitempty"`
+	PrintError   int      `json:"print_error,omitempty"`
+	HMS          []string `json:"hms,omitempty"`
+	SubtaskName  string   `json:"subtask_name,omitempty"`
+}
+
+// MaxFile is the largest file the link downloads (512 MB).
+const MaxFile = 512 << 20
+
+// ListSends calls GET sends?state=queued.
+func (c *Client) ListSends(ctx context.Context, key ed25519.PrivateKey, linkID string) ([]Send, error) {
+	var out struct {
+		Sends []Send `json:"sends"`
+	}
+	if err := c.do(ctx, key, linkID, http.MethodGet, "sends?state=queued", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Sends, nil
+}
+
+// SendState calls POST sends/<id>/state.
+func (c *Client) SendState(ctx context.Context, key ed25519.PrivateKey, linkID, id string, req StateRequest) error {
+	if !sendIDRe.MatchString(id) {
+		return errors.New("bad send id")
+	}
+	return c.do(ctx, key, linkID, http.MethodPost, "sends/"+id+"/state", req, nil)
+}
+
+// Events calls POST printers/<serial>/events (at most 50 per call).
+func (c *Client) Events(ctx context.Context, key ed25519.PrivateKey, linkID, serial string, events []Event) error {
+	if !serialRe.MatchString(serial) || len(events) == 0 || len(events) > 50 {
+		return errors.New("bad events call")
+	}
+	return c.do(ctx, key, linkID, http.MethodPost, "printers/"+serial+"/events", map[string]any{"events": events}, nil)
+}
+
+var (
+	sendIDRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+	serialRe = regexp.MustCompile(`^[A-Za-z0-9]{6,40}$`)
+)
+
+// ErrTooLarge means the file is over MaxFile.
+var ErrTooLarge = errors.New("file is larger than 512 MB")
+
+// Download fetches a send's file once with its one-time token (in the
+// X-SP-File-Token header, never in the URL) and writes it to w. It returns
+// the bytes written, the sha256 of what was written, and the server's
+// X-SP-SHA256 header.
+func (c *Client) Download(ctx context.Context, key ed25519.PrivateKey, linkID string, s Send, w io.Writer) (int64, string, string, error) {
+	if !sendIDRe.MatchString(s.ID) || s.FileURL != Prefix+"sends/"+s.ID+"/file" || s.FileToken == "" {
+		return 0, "", "", errors.New("bad file link")
+	}
+	u := c.base.JoinPath(s.FileURL)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return 0, "", "", err
+	}
+	c.sign(req, key, linkID, nil)
+	req.Header.Set("Accept", "application/octet-stream")
+	req.Header.Set("X-SP-File-Token", s.FileToken)
+	resp, err := c.download.Do(req)
+	if err != nil {
+		return 0, "", "", fmt.Errorf("GET file: %w", scrubURLError(err))
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		e := &Error{Status: resp.StatusCode}
+		var eb struct {
+			Code string `json:"code"`
+		}
+		if json.Unmarshal(data, &eb) == nil {
+			e.Code = eb.Code
+		}
+		return 0, "", "", e
+	}
+	if resp.ContentLength > MaxFile {
+		return 0, "", "", ErrTooLarge
+	}
+	h := sha256.New()
+	n, err := io.Copy(io.MultiWriter(w, h), io.LimitReader(resp.Body, MaxFile+1))
+	if err != nil {
+		return n, "", "", fmt.Errorf("GET file: %w", err)
+	}
+	if n > MaxFile {
+		return n, "", "", ErrTooLarge
+	}
+	return n, hex.EncodeToString(h.Sum(nil)), strings.ToLower(resp.Header.Get("X-SP-SHA256")), nil
 }
 
 // Pair calls POST pair. It is signed with key but carries no X-SP-Link.
@@ -263,7 +466,9 @@ func (c *Client) do(ctx context.Context, key ed25519.PrivateKey, linkID, method,
 			return err
 		}
 	}
-	u := c.base.JoinPath(Prefix + path)
+	p, query, _ := strings.Cut(path, "?")
+	u := c.base.JoinPath(Prefix + p)
+	u.RawQuery = query
 	var rdr io.Reader
 	if body != nil {
 		rdr = bytes.NewReader(body)
@@ -272,20 +477,11 @@ func (c *Client) do(ctx context.Context, key ed25519.PrivateKey, linkID, method,
 	if err != nil {
 		return err
 	}
-	ts := c.now().Unix()
-	nonce := signer.NewNonce()
-	target := req.URL.RequestURI()
-	req.Header.Set("User-Agent", c.userAgent)
 	req.Header.Set("Accept", "application/json")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if linkID != "" {
-		req.Header.Set(signer.HeaderLink, linkID)
-	}
-	req.Header.Set(signer.HeaderTimestamp, strconv.FormatInt(ts, 10))
-	req.Header.Set(signer.HeaderNonce, nonce)
-	req.Header.Set(signer.HeaderSignature, signer.Sign(key, method, target, ts, nonce, body))
+	c.sign(req, key, linkID, body)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -316,6 +512,19 @@ func (c *Client) do(ctx context.Context, key ed25519.PrivateKey, linkID, method,
 		}
 	}
 	return nil
+}
+
+// sign adds the user agent, the link id and the signature headers.
+func (c *Client) sign(req *http.Request, key ed25519.PrivateKey, linkID string, body []byte) {
+	ts := c.now().Unix()
+	nonce := signer.NewNonce()
+	req.Header.Set("User-Agent", c.userAgent)
+	if linkID != "" {
+		req.Header.Set(signer.HeaderLink, linkID)
+	}
+	req.Header.Set(signer.HeaderTimestamp, strconv.FormatInt(ts, 10))
+	req.Header.Set(signer.HeaderNonce, nonce)
+	req.Header.Set(signer.HeaderSignature, signer.Sign(key, req.Method, req.URL.RequestURI(), ts, nonce, body))
 }
 
 // scrubURLError keeps the operation and cause but drops nothing secret: our

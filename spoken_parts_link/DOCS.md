@@ -4,22 +4,30 @@ Spoken Parts Link connects the Bambu Lab printers at your site to Spoken Parts.
 It runs inside Home Assistant on a small computer at your site, such as a
 Raspberry Pi.
 
-## What it does in version 0.1
+## What it does
 
 - It finds Bambu Lab printers on your network. It only listens. It never sends
   anything to look for printers.
-- It reads each printer's status: idle or printing, percent done and time left.
-  It uses the printer's access code for this.
-- It tells Spoken Parts what it sees, about every 30 seconds.
+- It reads each printer's status: idle or printing, percent done, layers, time
+  left, errors, the filament in each AMS slot and the nozzle sizes. It uses the
+  printer's access code for this.
+- It tells Spoken Parts what it sees, about every 30 seconds (every 5 seconds
+  while a print is on its way).
+- It uploads the prints Spoken Parts sends to the printer's USB stick, and
+  follows each print to the end (see "Sending prints" below).
 
 ## What it does not do
 
-- It does not start, pause or stop prints. Version 0.1 only reads status.
+- It does not pause, stop or move a printer, heat it, run its fans or change
+  its settings. It cannot.
+- It does not start prints by itself. Your printers stay in Bambu's Cloud
+  mode, and in Cloud mode only Bambu's own apps or a person at the printer can
+  start a print. Someone taps the file on the printer screen.
 - It never sends your printer access codes to Spoken Parts. They stay on this
-  device.
-- It sends only one kind of message to a printer: a request for its full status
-  (called "pushall"). It sends it once after it connects, and at most once every
-  5 minutes per printer.
+  device, and only go to the printer they belong to.
+- It sends only two kinds of message to a printer: a request for its full
+  status (called "pushall"), at most once every 5 minutes, and the file upload
+  (FTPS, port 990).
 - It opens no port to the internet. It only makes outgoing HTTPS connections to
   spokenparts.com.
 
@@ -27,6 +35,8 @@ Raspberry Pi.
 
 - Home Assistant OS. Apps need it. A Raspberry Pi 4 or 5 works well.
 - Your printers and Home Assistant on the same network.
+- A USB stick in each printer that should receive prints (FAT32 or exFAT).
+  On the H2D, H2S and X2D the link can only upload to a USB stick.
 - An owner account in Spoken Parts for this site.
 
 ## Install
@@ -114,6 +124,35 @@ again by itself.
 The link also ignores printer announcements that come from outside your local
 network, or that name an address other than the sender's own.
 
+## Sending prints
+
+1. A worker scans the printer's Ready code in Spoken Parts. Spoken Parts picks
+   the next print and the link starts uploading it right away.
+2. While it uploads, the phone shows the changes the print needs, one at a
+   time: the filament for each AMS slot (and which nozzle it feeds on an H2D),
+   a nozzle swap, the plate. The link checks the filament and nozzle steps
+   against what the printer reports.
+3. When the upload is done and every step checks out, the phone says which
+   file to tap: on the printer screen open Storage, tap that file (its name
+   starts with SP and the printer number), check the filament list matches what
+   the phone shows, and press Print.
+4. The link sees the print start and follows it to the end. When it ends, the
+   link deletes the file it uploaded.
+
+If the printer has no USB stick, Spoken Parts says "Insert a USB stick" for
+that printer. Insert one and tap Try again on the phone.
+
+If someone starts a different file, or the printer uses an AMS slot this print
+should not use, Spoken Parts tells the worker and the owner. Stop the print on
+the printer screen if it is wrong. The link can't stop it.
+
+The link page shows, for each printer, whether a USB stick is in, how prints
+start ("No, upload only" in Cloud mode), the print it is delivering, and the
+last delivery problem.
+
+Files wait in the app's private data folder while they are delivered. They are
+deleted after the print, after a failure, or when the link is removed.
+
 ## Why the app uses the host network
 
 Bambu Lab printers announce themselves with a broadcast on UDP port 2021. An
@@ -180,11 +219,11 @@ This is optional. Every release image is signed by our GitHub release workflow.
 To check it yourself, install cosign and the GitHub CLI, then run:
 
 ```
-cosign verify ghcr.io/arrowtech-labs/spoken-parts-link:0.1.1 --certificate-identity-regexp '^https://github.com/ArrowTech-Labs/spoken-parts-link/.github/workflows/release.yml@refs/tags/v' --certificate-oidc-issuer https://token.actions.githubusercontent.com
+cosign verify ghcr.io/arrowtech-labs/spoken-parts-link:0.2.0 --certificate-identity-regexp '^https://github.com/ArrowTech-Labs/spoken-parts-link/.github/workflows/release.yml@refs/tags/v' --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
 ```
-gh attestation verify oci://ghcr.io/arrowtech-labs/spoken-parts-link:0.1.1 --owner ArrowTech-Labs
+gh attestation verify oci://ghcr.io/arrowtech-labs/spoken-parts-link:0.2.0 --owner ArrowTech-Labs
 ```
 
 Both commands should say the check passed. Home Assistant itself does not check

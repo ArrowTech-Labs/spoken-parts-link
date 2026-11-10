@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -21,6 +22,7 @@ import (
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/logx"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/printers"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/redact"
+	"github.com/ArrowTech-Labs/spoken-parts-link/internal/sends"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/ssdp"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/store"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/web"
@@ -50,11 +52,16 @@ type Config struct {
 	UnknownRetry   time.Duration // 20 s between unknown_link checks
 	Now            func() time.Time
 
+	// AutoStart allows project_file on Developer Mode printers (off).
+	AutoStart bool
+
 	// Test hooks.
 	HTTPClient   *http.Client
 	PrinterDial  func(ctx context.Context, network, addr string) (net.Conn, error)
 	PrinterPort  int
+	FTPSPort     int
 	PrinterRetry time.Duration
+	Sends        sends.Config // only the timings are used
 }
 
 // App is the running link.
@@ -65,6 +72,7 @@ type App struct {
 	api      *api.Client
 	codes    *store.Codes
 	printers *printers.Manager
+	sends    *sends.Runner
 	started  time.Time
 	wake     chan struct{}
 
@@ -129,7 +137,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	if cfg.HTTPClient != nil {
 		a.api.SetHTTPClient(cfg.HTTPClient)
 	}
-	for _, d := range []string{"identity", "secrets", "state"} {
+	for _, d := range []string{"identity", "secrets", "state", "spool"} {
 		if err := fsutil.EnsureDir(filepath.Join(cfg.DataDir, d)); err != nil {
 			return nil, err
 		}
@@ -142,19 +150,30 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		a.st = store.State{}
 	}
 	m, err := printers.New(ctx, printers.Config{
-		Bundle:   cfg.Bundle,
-		Codes:    a.codes,
-		MetaPath: filepath.Join(cfg.DataDir, "state", "printers.json"),
-		Log:      cfg.Log,
-		Port:     cfg.PrinterPort,
-		Dial:     cfg.PrinterDial,
-		RetryMin: cfg.PrinterRetry,
-		Now:      cfg.Now,
+		Bundle:    cfg.Bundle,
+		Codes:     a.codes,
+		MetaPath:  filepath.Join(cfg.DataDir, "state", "printers.json"),
+		Log:       cfg.Log,
+		Port:      cfg.PrinterPort,
+		Dial:      cfg.PrinterDial,
+		RetryMin:  cfg.PrinterRetry,
+		FTPSPort:  cfg.FTPSPort,
+		AutoStart: cfg.AutoStart,
+		Now:       cfg.Now,
 	})
 	if err != nil {
 		return nil, err
 	}
 	a.printers = m
+	sc := cfg.Sends
+	sc.SpoolDir = filepath.Join(cfg.DataDir, "spool")
+	sc.StatePath = filepath.Join(cfg.DataDir, "state", "sends.json")
+	sc.API = linkAPI{a}
+	sc.Printers = m
+	sc.Log = cfg.Log
+	if a.sends, err = sends.New(sc); err != nil {
+		return nil, err
+	}
 	if a.st.Status == store.StatusPending && cfg.Now().Sub(a.st.PendingSince) > cfg.PendingTimeout {
 		a.mu.Lock()
 		a.resetLocked(web.MsgTimedOut, true)
@@ -233,6 +252,9 @@ func (a *App) currentLocked(s snapshot) bool {
 
 // Run drives the link until ctx is done.
 func (a *App) Run(ctx context.Context) {
+	done := make(chan struct{})
+	go func() { a.sends.Run(ctx); close(done) }()
+	defer func() { <-done }()
 	for ctx.Err() == nil {
 		s := a.snap()
 		switch s.status {
@@ -370,6 +392,9 @@ func (a *App) stepActive(ctx context.Context, s snapshot) {
 		if changed {
 			a.saveStateLocked()
 		}
+		if resp.SendsWaiting > 0 && !resp.Paused {
+			a.sends.Kick()
+		}
 		wait = a.nextSync(resp.NextSyncS)
 	}
 	a.mu.Unlock()
@@ -445,6 +470,7 @@ func (a *App) loadDataKey(ctx context.Context, s snapshot) bool {
 	a.unknownCount = 0
 	a.codesReady = true
 	a.printers.SetEnabled(true)
+	a.sends.SetEnabled(true)
 	a.log.Info("access codes opened", "count", len(a.codes.Values()))
 	return true
 }
@@ -492,9 +518,89 @@ func (a *App) buildSync() api.SyncRequest {
 			Percent:         p.Percent,
 			RemainingMin:    p.RemainingMin,
 			CertFingerprint: p.CertFingerprint,
+			Storage:         p.Storage,
+			AMS:             syncTrays(p.Trays),
+			Nozzles:         syncNozzles(p.Nozzles),
+			SubtaskName:     p.Subtask,
+			GcodeFile:       p.GcodeFile,
+			Layer:           p.Layer,
+			TotalLayers:     p.TotalLayers,
+			TrayNow:         p.TrayNow,
+			CanStart:        p.CanStart(a.cfg.AutoStart),
 		})
 	}
 	return req
+}
+
+func syncTrays(ts []printers.Tray) []api.SyncTray {
+	var out []api.SyncTray
+	for _, t := range ts {
+		if len(out) >= 64 {
+			break
+		}
+		out = append(out, api.SyncTray{AmsID: t.AmsID, SlotID: t.SlotID, Type: t.Type, Color: t.Color, Nozzle: t.Nozzle})
+	}
+	return out
+}
+
+func syncNozzles(ns []printers.Nozzle) []api.SyncNozzle {
+	var out []api.SyncNozzle
+	for _, n := range ns {
+		if len(out) >= 2 {
+			break
+		}
+		out = append(out, api.SyncNozzle{Side: n.Side, Diameter: n.Diameter, Type: n.Type})
+	}
+	return out
+}
+
+// linkAPI signs the sends calls with the link's current key.
+type linkAPI struct{ a *App }
+
+var errNotActive = errors.New("link is not active")
+
+func (l linkAPI) active() (snapshot, error) {
+	s := l.a.snap()
+	if s.status != store.StatusActive {
+		return s, errNotActive
+	}
+	return s, nil
+}
+
+func (l linkAPI) ListSends(ctx context.Context) ([]api.Send, error) {
+	s, err := l.active()
+	if err != nil {
+		return nil, err
+	}
+	out, err := l.a.api.ListSends(ctx, s.key, s.linkID)
+	for i := range out {
+		l.a.red.AddTransient(out[i].FileToken)
+	}
+	return out, err
+}
+
+func (l linkAPI) Download(ctx context.Context, send api.Send, w io.Writer) (int64, string, string, error) {
+	s, err := l.active()
+	if err != nil {
+		return 0, "", "", err
+	}
+	return l.a.api.Download(ctx, s.key, s.linkID, send, w)
+}
+
+func (l linkAPI) SendState(ctx context.Context, id string, req api.StateRequest) error {
+	s, err := l.active()
+	if err != nil {
+		return err
+	}
+	return l.a.api.SendState(ctx, s.key, s.linkID, id, req)
+}
+
+func (l linkAPI) Events(ctx context.Context, serial string, events []api.Event) error {
+	s, err := l.active()
+	if err != nil {
+		return err
+	}
+	return l.a.api.Events(ctx, s.key, s.linkID, serial, events)
 }
 
 func syncRank(p printers.Snapshot) int {
@@ -512,6 +618,8 @@ func syncRank(p printers.Snapshot) int {
 // access code file, the key and the local secret, then makes a new key.
 func (a *App) resetLocked(notice web.Msg, wipe bool) {
 	a.printers.SetEnabled(false)
+	// Sends and their files (the spool) go with the link.
+	a.sends.Reset()
 	if wipe {
 		a.printers.ResetAccess()
 		if err := a.codes.Wipe(); err != nil {
@@ -569,6 +677,13 @@ func (a *App) View() web.View {
 	}
 	a.mu.Unlock()
 	v.Printers = a.printers.Snapshot()
+	v.AutoStart = a.cfg.AutoStart
+	v.Sends = map[string]sends.Status{}
+	for _, p := range v.Printers {
+		if st, ok := a.sends.Status(p.Serial); ok {
+			v.Sends[p.Serial] = st
+		}
+	}
 	return v
 }
 

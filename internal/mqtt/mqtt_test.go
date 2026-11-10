@@ -136,6 +136,7 @@ func TestPublishSurface(t *testing.T) {
 	files, _ := filepath.Glob("*.go")
 	exported := map[string]bool{}
 	publishBuilders := 0
+	publishCalls := map[string][]string{}
 	for _, name := range files {
 		if strings.HasSuffix(name, "_test.go") {
 			continue
@@ -178,6 +179,20 @@ func TestPublishSurface(t *testing.T) {
 				}
 			}
 		}
+		for _, d := range f.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok || fd.Body == nil {
+				continue
+			}
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				if call, ok := n.(*ast.CallExpr); ok {
+					if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "publishPacket" {
+						publishCalls["publishPacket"] = append(publishCalls["publishPacket"], fd.Name.Name)
+					}
+				}
+				return true
+			})
+		}
 		ast.Inspect(f, func(n ast.Node) bool {
 			switch n := n.(type) {
 			case *ast.Ident:
@@ -204,16 +219,26 @@ func TestPublishSurface(t *testing.T) {
 		})
 	}
 	// typePublish: its declaration, the PUBLISH case in Run, and the one
-	// header byte in pushAllPacket.
+	// header byte in publishPacket.
 	if publishBuilders != 3 {
-		t.Errorf("typePublish used %d times, want 3 (decl, read switch, pushAllPacket)", publishBuilders)
+		t.Errorf("typePublish used %d times, want 3 (decl, read switch, publishPacket)", publishBuilders)
+	}
+	for callee, callers := range publishCalls {
+		_ = callee
+		sort.Strings(callers)
+		if got := strings.Join(callers, ","); got != "projectFilePacket,pushAllPacket" {
+			t.Errorf("publishPacket called from %s, want only pushAllPacket and projectFilePacket", got)
+		}
+	}
+	if len(publishCalls) != 1 {
+		t.Error("publishPacket is not called the expected way")
 	}
 	var names []string
 	for n := range exported {
 		names = append(names, n)
 	}
 	sort.Strings(names)
-	want := "Client|Client.Close|Client.RequestPushAll|Client.Run|ConnackError|ConnackError.BadCredentials|ConnackError.Error|Connect|DefaultMaxPacket|ErrWatchdog|Options|PushAllPayload"
+	want := "AllowedCommands|AmsSlot|Client|Client.Close|Client.RequestPushAll|Client.Run|Client.StartProjectFile|ConnackError|ConnackError.BadCredentials|ConnackError.Error|Connect|DefaultMaxPacket|ErrAlreadyStarted|ErrBadCommand|ErrWatchdog|Options|ProjectFile|PushAllPayload"
 	if got := strings.Join(names, "|"); got != want {
 		t.Errorf("exported API changed:\n got %s\nwant %s", got, want)
 	}
@@ -237,7 +262,7 @@ func allowedWriteArg(e ast.Expr) bool {
 		return a.Name == "pkt" || a.Name == "p"
 	case *ast.CallExpr:
 		if id, ok := a.Fun.(*ast.Ident); ok {
-			return id.Name == "subscribePacket" || id.Name == "pushAllPacket"
+			return id.Name == "subscribePacket" || id.Name == "pushAllPacket" || id.Name == "projectFilePacket"
 		}
 	case *ast.CompositeLit:
 		return isFixedPacket(a, "typeDisconnect")
@@ -264,4 +289,86 @@ func isFixedPacket(e ast.Expr, types ...string) bool {
 		}
 	}
 	return false
+}
+
+func TestAllowedCommandsAreExactlyPushallAndProjectFile(t *testing.T) {
+	if got := strings.Join(AllowedCommands[:], ","); got != "pushall,project_file" {
+		t.Fatalf("AllowedCommands = %s", got)
+	}
+}
+
+func goodProjectFile() ProjectFile {
+	return ProjectFile{
+		Plate:        1,
+		URL:          "ftp:///SP2-SP1052-1-A1B2.gcode.3mf",
+		MD5:          "0123456789abcdef0123456789abcdef",
+		SubtaskName:  "SP2-SP1052-1-A1B2",
+		UseAMS:       true,
+		AmsMapping:   []int{1, -1},
+		AmsMapping2:  []AmsSlot{{AmsID: 0, SlotID: 1}, {AmsID: 255, SlotID: 255}},
+		BedLeveling:  true,
+		LayerInspect: true,
+	}
+}
+
+func TestProjectFilePayloadAndChecks(t *testing.T) {
+	b, err := goodProjectFile().payload("7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"print":{"ams_mapping":[1,-1],"ams_mapping2":[{"ams_id":0,"slot_id":1},{"ams_id":255,"slot_id":255}],"bed_leveling":true,"bed_type":"auto","command":"project_file","flow_cali":false,"layer_inspect":true,"md5":"0123456789abcdef0123456789abcdef","param":"Metadata/plate_1.gcode","profile_id":"0","project_id":"0","sequence_id":"7","subtask_id":"0","subtask_name":"SP2-SP1052-1-A1B2","task_id":"0","timelapse":false,"url":"ftp:///SP2-SP1052-1-A1B2.gcode.3mf","use_ams":true,"vibration_cali":false}}`
+	if string(b) != want {
+		t.Fatalf("payload\n got %s\nwant %s", b, want)
+	}
+	bad := []func(*ProjectFile){
+		func(p *ProjectFile) { p.Plate = 0 },
+		func(p *ProjectFile) { p.URL = "ftp:///../../etc/passwd" },
+		func(p *ProjectFile) { p.URL = "http://evil/SP2-X.gcode.3mf" },
+		func(p *ProjectFile) { p.MD5 = "nope" },
+		func(p *ProjectFile) { p.SubtaskName = `x","command":"stop` },
+		func(p *ProjectFile) { p.AmsMapping2 = nil },
+		func(p *ProjectFile) { p.AmsMapping = []int{300, 1} },
+	}
+	for i, f := range bad {
+		p := goodProjectFile()
+		f(&p)
+		if _, err := p.payload("1"); !errors.Is(err, ErrBadCommand) {
+			t.Errorf("case %d accepted", i)
+		}
+	}
+}
+
+func TestStartProjectFileOncePerSession(t *testing.T) {
+	ca := testutil.NewCA(t, "Test Printer CA")
+	b := testutil.NewBroker(t, ca.Leaf(t, serial), serial, code)
+	c, err := Connect(dial(t, ca, b.Addr), serial, Options{Username: "bblp", Password: code})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if err := c.StartProjectFile(goodProjectFile(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.StartProjectFile(goodProjectFile(), 2); !errors.Is(err, ErrAlreadyStarted) {
+		t.Fatalf("second start: %v", err)
+	}
+	p := goodProjectFile()
+	p.MD5 = "x"
+	waitPublishes(t, b, 1)
+	pubs := b.Publishes()
+	if len(pubs) != 1 || !strings.Contains(pubs[0].Payload, `"command":"project_file"`) {
+		t.Fatalf("publishes %+v", pubs)
+	}
+}
+
+func waitPublishes(t *testing.T, b *testutil.Broker, n int) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(b.Publishes()) >= n {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("want %d publishes, got %d", n, len(b.Publishes()))
 }

@@ -34,6 +34,9 @@ type Config struct {
 	Allow    []netip.Addr
 	SSDP     string
 	LogLevel string
+	// AutoStart lets the link start prints itself on Developer Mode printers
+	// (project_file). Off unless SP_LINK_AUTOSTART is "true".
+	AutoStart bool
 }
 
 // Load reads env (through getenv) and <data>/options.json.
@@ -43,12 +46,14 @@ type Config struct {
 //	SP_LINK_ALLOW   comma separated source IPs allowed, default 172.30.32.2
 //	SP_LINK_DATA    data folder, default /data
 //	SP_LINK_SSDP    discovery listen address, default 0.0.0.0:2021
+//	SP_LINK_AUTOSTART  "true" to allow auto start (Developer Mode printers only), default off
 func Load(getenv func(string) string) (Config, error) {
 	c := Config{
-		DataDir:  or(getenv("SP_LINK_DATA"), DefaultDataDir),
-		Listen:   or(getenv("SP_LINK_LISTEN"), DefaultListen),
-		SSDP:     or(getenv("SP_LINK_SSDP"), DefaultSSDP),
-		LogLevel: "info",
+		DataDir:   or(getenv("SP_LINK_DATA"), DefaultDataDir),
+		Listen:    or(getenv("SP_LINK_LISTEN"), DefaultListen),
+		SSDP:      or(getenv("SP_LINK_SSDP"), DefaultSSDP),
+		LogLevel:  "info",
+		AutoStart: strings.EqualFold(strings.TrimSpace(getenv("SP_LINK_AUTOSTART")), "true"),
 	}
 	srv, err := api.ParseServer(or(getenv("SP_LINK_SERVER"), api.DefaultServer))
 	if err != nil {

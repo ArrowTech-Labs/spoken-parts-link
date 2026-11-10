@@ -11,12 +11,14 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"io"
 	"math/big"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -108,7 +110,62 @@ type Broker struct {
 	publishes  []Publish
 	reports    [][]byte
 	conns      []net.Conn
+	writers    []func([]byte)
+	mode       string // "", "cloud" or "developer": how project_file is answered
+	walkDelay  time.Duration
 	wg         sync.WaitGroup
+}
+
+// SetMode sets how the fake printer answers project_file: "cloud" refuses it
+// like a printer that needs Bambu's authorization, "developer" accepts it and
+// walks PREPARE, RUNNING (3 layers) and FINISH.
+func (b *Broker) SetMode(mode string, step time.Duration) {
+	b.mu.Lock()
+	b.mode, b.walkDelay = mode, step
+	b.mu.Unlock()
+}
+
+// Push sends a report payload to every connected, subscribed client.
+func (b *Broker) Push(payload []byte) {
+	b.mu.Lock()
+	ws := make([]func([]byte), len(b.writers))
+	copy(ws, b.writers)
+	b.mu.Unlock()
+	pkt := encodePublish("device/"+b.Serial+"/report", payload)
+	for _, w := range ws {
+		w(pkt)
+	}
+}
+
+func (b *Broker) answerProjectFile(payload string) {
+	b.mu.Lock()
+	mode, step := b.mode, b.walkDelay
+	b.mu.Unlock()
+	switch mode {
+	case "cloud":
+		b.Push([]byte(`{"print":{"command":"project_file","sequence_id":"1","result":"failed","reason":"mqtt message verify failed","err_code":84033543}}`))
+	case "developer":
+		var msg struct {
+			Print struct {
+				Subtask string `json:"subtask_name"`
+			} `json:"print"`
+		}
+		_ = json.Unmarshal([]byte(payload), &msg)
+		name := msg.Print.Subtask
+		b.Push([]byte(`{"print":{"command":"project_file","sequence_id":"1","result":"success"}}`))
+		go func() {
+			walk := []string{
+				`{"print":{"gcode_state":"PREPARE","subtask_name":"` + name + `","mc_percent":0,"layer_num":0,"total_layer_num":3}}`,
+				`{"print":{"gcode_state":"RUNNING","subtask_name":"` + name + `","mc_percent":33,"layer_num":1,"total_layer_num":3}}`,
+				`{"print":{"gcode_state":"RUNNING","subtask_name":"` + name + `","mc_percent":66,"layer_num":2,"total_layer_num":3}}`,
+				`{"print":{"gcode_state":"FINISH","subtask_name":"` + name + `","mc_percent":100,"layer_num":3,"total_layer_num":3}}`,
+			}
+			for _, r := range walk {
+				time.Sleep(step)
+				b.Push([]byte(r))
+			}
+		}()
+	}
 }
 
 // NewBroker listens on 127.0.0.1. code is the access code it accepts.
@@ -167,6 +224,14 @@ func (b *Broker) DropAll() {
 		_ = c.Close()
 	}
 	b.conns = nil
+	b.writers = nil
+	b.mu.Unlock()
+}
+
+// SetReports changes the reports sent after the next pushall.
+func (b *Broker) SetReports(reports ...[]byte) {
+	b.mu.Lock()
+	b.reports = reports
 	b.mu.Unlock()
 }
 
@@ -224,6 +289,7 @@ func (b *Broker) serve(c *tls.Conn) {
 	write := func(p []byte) {
 		wmu.Lock()
 		defer wmu.Unlock()
+		_ = c.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		_, _ = c.Write(p)
 	}
 	for {
@@ -251,6 +317,9 @@ func (b *Broker) serve(c *tls.Conn) {
 				return
 			}
 			write([]byte{0x90, 3, body[0], body[1], 0})
+			b.mu.Lock()
+			b.writers = append(b.writers, write)
+			b.mu.Unlock()
 		case 3: // PUBLISH
 			if len(body) < 2 {
 				return
@@ -264,6 +333,10 @@ func (b *Broker) serve(c *tls.Conn) {
 			b.publishes = append(b.publishes, p)
 			reports := b.reports
 			b.mu.Unlock()
+			if strings.Contains(p.Payload, `"command":"project_file"`) {
+				b.answerProjectFile(p.Payload)
+				continue
+			}
 			for _, rep := range reports {
 				write(encodePublish("device/"+b.Serial+"/report", rep))
 			}

@@ -1,9 +1,9 @@
 # Home Assistant app (add-on) configuration for Spoken Parts Link.
 # Reference: https://developers.home-assistant.io/docs/add-ons/configuration
 name: "Spoken Parts Link"
-version: "0.1.1"
+version: "0.2.0"
 slug: spoken_parts_link
-description: "Shows the status of your Bambu Lab printers in Spoken Parts."
+description: "Sends prints from Spoken Parts to your Bambu Lab printers and shows their status."
 url: "https://github.com/ArrowTech-Labs/spoken-parts-link"
 arch:
   - aarch64

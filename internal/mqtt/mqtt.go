@@ -1,10 +1,13 @@
-// Package mqtt is a minimal MQTT 3.1.1 client for reading Bambu Lab printer
-// status.
+// Package mqtt is a minimal MQTT 3.1.1 client for Bambu Lab printers.
 //
 // It supports CONNECT/CONNACK, SUBSCRIBE/SUBACK, incoming PUBLISH,
 // PINGREQ/PINGRESP and DISCONNECT. On purpose it has no general publish
-// function: the only message it can ever send to a printer is the constant
-// "pushall" status request, through RequestPushAll. Tests enforce this.
+// function. It can send exactly the commands in AllowedCommands: the constant
+// "pushall" status request (RequestPushAll), and "project_file" built from a
+// typed, checked ProjectFile (StartProjectFile, at most once per session, used
+// only for Developer Mode printers when auto start is on). There is no way to
+// send pause, stop, motion, temperature, fan, AMS, firmware or camera commands.
+// Tests in this package and in internal/repocheck enforce this.
 package mqtt
 
 import (
@@ -12,17 +15,22 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"regexp"
+	"strconv"
 	"sync"
 	"time"
 )
 
-// PushAllPayload is the one and only payload this package can publish.
+// PushAllPayload is the status request payload.
 const PushAllPayload = `{"pushing":{"sequence_id":"0","command":"pushall","version":1,"push_target":1}}`
+
+// AllowedCommands is every command this package can ever send to a printer.
+var AllowedCommands = [...]string{"pushall", "project_file"}
 
 // Packet types (high nibble of the fixed header).
 const (
@@ -79,6 +87,7 @@ type Client struct {
 	wmu     sync.Mutex
 	closed  bool
 	pushed  bool
+	started bool
 	closeMu sync.Once
 }
 
@@ -177,6 +186,107 @@ func (c *Client) RequestPushAll() error {
 	c.pushed = true
 	_ = c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	_, err := c.conn.Write(pushAllPacket(c.serial))
+	return err
+}
+
+// AmsSlot is one entry of ams_mapping2: the AMS unit and slot a project
+// filament prints from. 255/255 means the filament is not used.
+type AmsSlot struct {
+	AmsID  int `json:"ams_id"`
+	SlotID int `json:"slot_id"`
+}
+
+// ProjectFile is a project_file start for a file already on the printer's
+// storage. Every field is checked before anything is sent.
+type ProjectFile struct {
+	Plate         int    // the plate number, for param "Metadata/plate_<n>.gcode"
+	URL           string // ftp:///<name> or file:///sdcard/<name>
+	MD5           string // the plate G-code's md5, lower case hex
+	SubtaskName   string
+	UseAMS        bool
+	AmsMapping    []int
+	AmsMapping2   []AmsSlot
+	Timelapse     bool
+	BedLeveling   bool
+	FlowCali      bool
+	VibrationCali bool
+	LayerInspect  bool
+}
+
+var (
+	projectURLRe = regexp.MustCompile(`^(ftp:///|file:///sdcard/)SP[0-9]{1,5}-[A-Za-z0-9-]{1,30}\.gcode\.3mf$`)
+	md5Re        = regexp.MustCompile(`^[0-9a-f]{32}$`)
+	subtaskRe    = regexp.MustCompile(`^SP[0-9]{1,5}-[A-Za-z0-9-]{1,30}$`)
+)
+
+// ErrBadCommand means a ProjectFile failed its checks; nothing was sent.
+var ErrBadCommand = errors.New("project_file refused: a field failed its check")
+
+func (p ProjectFile) payload(seq string) ([]byte, error) {
+	if p.Plate < 1 || p.Plate > 99 || !projectURLRe.MatchString(p.URL) || !md5Re.MatchString(p.MD5) ||
+		!subtaskRe.MatchString(p.SubtaskName) || len(p.AmsMapping) > 64 || len(p.AmsMapping2) != len(p.AmsMapping) {
+		return nil, ErrBadCommand
+	}
+	for i, v := range p.AmsMapping {
+		s := p.AmsMapping2[i]
+		if v < -1 || v > 255 || s.AmsID < 0 || s.AmsID > 255 || s.SlotID < 0 || s.SlotID > 255 {
+			return nil, ErrBadCommand
+		}
+	}
+	mapping := p.AmsMapping
+	if mapping == nil {
+		mapping = []int{}
+	}
+	mapping2 := p.AmsMapping2
+	if mapping2 == nil {
+		mapping2 = []AmsSlot{}
+	}
+	body := map[string]any{"print": map[string]any{
+		"sequence_id":    seq,
+		"command":        AllowedCommands[1],
+		"param":          fmt.Sprintf("Metadata/plate_%d.gcode", p.Plate),
+		"project_id":     "0",
+		"profile_id":     "0",
+		"task_id":        "0",
+		"subtask_id":     "0",
+		"subtask_name":   p.SubtaskName,
+		"url":            p.URL,
+		"md5":            p.MD5,
+		"timelapse":      p.Timelapse,
+		"bed_type":       "auto",
+		"bed_leveling":   p.BedLeveling,
+		"flow_cali":      p.FlowCali,
+		"vibration_cali": p.VibrationCali,
+		"layer_inspect":  p.LayerInspect,
+		"use_ams":        p.UseAMS,
+		"ams_mapping":    mapping,
+		"ams_mapping2":   mapping2,
+	}}
+	return json.Marshal(body)
+}
+
+// ErrAlreadyStarted means this session already sent its one project_file.
+var ErrAlreadyStarted = errors.New("this session already sent a project_file")
+
+// StartProjectFile sends one project_file command on device/<serial>/request.
+// It works at most once per Client. The caller decides whether the printer
+// may be started at all (Developer Mode, auto start on).
+func (c *Client) StartProjectFile(p ProjectFile, seq int) error {
+	payload, err := p.payload(strconv.Itoa(seq))
+	if err != nil {
+		return err
+	}
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
+	if c.closed {
+		return net.ErrClosed
+	}
+	if c.started {
+		return ErrAlreadyStarted
+	}
+	c.started = true
+	_ = c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	_, err = c.conn.Write(projectFilePacket(c.serial, payload))
 	return err
 }
 
@@ -322,12 +432,22 @@ func subscribePacket(id uint16, topic string) []byte {
 	return append(out, body...)
 }
 
-// pushAllPacket is the only PUBLISH encoder in this package. It takes no
-// payload argument: the payload is always PushAllPayload, QoS 0, no retain.
+// pushAllPacket publishes PushAllPayload, QoS 0, no retain.
 func pushAllPacket(serial string) []byte {
+	return publishPacket(serial, []byte(PushAllPayload))
+}
+
+// projectFilePacket publishes a payload built by ProjectFile.payload only.
+func projectFilePacket(serial string, payload []byte) []byte {
+	return publishPacket(serial, payload)
+}
+
+// publishPacket is the only PUBLISH encoder. Only pushAllPacket and
+// projectFilePacket call it (TestPublishSurface checks).
+func publishPacket(serial string, payload []byte) []byte {
 	var body []byte
 	body = appendString(body, requestTopic(serial))
-	body = append(body, PushAllPayload...)
+	body = append(body, payload...)
 	out := []byte{typePublish << 4}
 	out = appendRemaining(out, len(body))
 	return append(out, body...)

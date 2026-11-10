@@ -1,10 +1,12 @@
 // Package printers keeps the list of printers seen on the network and runs
-// one MQTT status session per printer that has an access code.
+// one MQTT status session per printer that has an access code. It also
+// uploads files to a printer's storage over FTPS (upload.go).
 //
-// Before an access code is sent, the printer's TLS certificate must chain to
-// a bundled Bambu Lab CA with the serial as its common name, or match a
-// certificate the owner chose to trust. The only message ever sent to a
-// printer is the constant pushall status request.
+// Before an access code is sent (MQTT or FTPS), the printer's TLS certificate
+// must chain to a bundled Bambu Lab CA with the serial as its common name, or
+// match a certificate the owner chose to trust. The only MQTT messages ever
+// sent are the constant pushall status request and, only with auto start on
+// and only to a printer in Developer Mode, one checked project_file start.
 package printers
 
 import (
@@ -61,7 +63,11 @@ type Config struct {
 	RetryMax     time.Duration                                                     // 5 min
 	OnlineWindow time.Duration                                                     // 90 s
 	MaxPrinters  int                                                               // 200
-	Now          func() time.Time
+	FTPSPort     int                                                               // 990
+	// AutoStart allows a project_file start (Developer Mode printers only).
+	// Off by default (SP_LINK_AUTOSTART); our printers stay in Cloud mode.
+	AutoStart bool
+	Now       func() time.Time
 }
 
 // Discovery limits. A LAN host can send any announcement, so a printer's
@@ -106,6 +112,8 @@ type printer struct {
 	reportFW    string
 	lastReport  time.Time
 	lastPushAll time.Time
+	live        live
+	client      *mqtt.Client // the open MQTT session, while connected
 
 	gen    uint64
 	cancel context.CancelFunc
@@ -141,6 +149,46 @@ type Snapshot struct {
 	// Spoofed is true when, in the last day, something answered for this
 	// printer with a certificate that did not check out.
 	Spoofed bool
+
+	// SPOK-LINK-V02: the job, storage, AMS and nozzles from the reports.
+	Layer       *int
+	TotalLayers *int
+	Subtask     string
+	GcodeFile   string
+	PrintError  int
+	HMS         []string
+	HMSFatal    bool
+	Storage     *bool
+	Trays       []Tray
+	Nozzles     []Nozzle
+	Mapping     []int
+	TrayNow     *int
+	// Command is the printer's last answer to a command, CommandSeq counts them.
+	Command    *CommandResult
+	CommandSeq int
+}
+
+// CanStart says how a print starts on this printer: "auto" (Developer Mode
+// and auto start on), "upload_only" (someone taps the file on the printer
+// screen) or "unknown".
+func (s Snapshot) CanStart(autoStart bool) string {
+	switch {
+	case s.DevMode == nil:
+		return "unknown"
+	case *s.DevMode && autoStart:
+		return "auto"
+	default:
+		return "upload_only"
+	}
+}
+
+// Busy reports whether the printer is running a print.
+func (s Snapshot) Busy() bool {
+	switch s.GcodeState {
+	case "RUNNING", "PREPARE", "PAUSE", "SLICING":
+		return true
+	}
+	return false
 }
 
 // SerialTail is the last 4 characters of the serial.
@@ -163,6 +211,9 @@ type Manager struct {
 func New(ctx context.Context, cfg Config) (*Manager, error) {
 	if cfg.Port == 0 {
 		cfg.Port = 8883
+	}
+	if cfg.FTPSPort == 0 {
+		cfg.FTPSPort = 990
 	}
 	if cfg.Dial == nil {
 		d := &net.Dialer{Timeout: 10 * time.Second}
@@ -476,6 +527,17 @@ func (m *Manager) Snapshot() []Snapshot {
 		if p.reportFW != "" {
 			s.Firmware = p.reportFW
 		}
+		l := &p.live
+		s.Layer, s.TotalLayers = cloneInt(l.layer), cloneInt(l.total)
+		s.Subtask, s.GcodeFile, s.PrintError = l.subtask, l.gcodeFile, l.printError
+		s.HMS, s.HMSFatal = append([]string(nil), l.hms...), l.hmsFatal
+		s.Storage, s.TrayNow = cloneBool(l.storage), cloneInt(l.trayNow)
+		s.Mapping = append([]int(nil), l.mapping...)
+		s.Trays, s.Nozzles = l.snapshot()
+		if l.command != nil {
+			c := *l.command
+			s.Command, s.CommandSeq = &c, l.commandSeq
+		}
 		switch p.connect {
 		case "lan":
 			s.LanOnly = boolPtr(true)
@@ -541,6 +603,7 @@ func (m *Manager) stopLocked(p *printer) {
 		p.cancel = nil
 	}
 	p.connected = false
+	p.client = nil
 }
 
 // restartLocked stops any session and starts a new one if it should run.
@@ -773,6 +836,7 @@ func (m *Manager) connectOnce(ctx context.Context, serial string, gen uint64) ou
 			doPush = true
 		}
 	})
+	m.with(serial, gen, func(p *printer) { p.client = client })
 	m.cfg.Log.Info("connected to printer", "serial_tail", tail)
 	if doPush {
 		if err := client.RequestPushAll(); err != nil {
@@ -781,7 +845,7 @@ func (m *Manager) connectOnce(ctx context.Context, serial string, gen uint64) ou
 	}
 	err = client.Run(ctx, func(payload []byte) { m.applyReport(serial, gen, payload) })
 	client.Close()
-	m.with(serial, gen, func(p *printer) { p.connected = false })
+	m.with(serial, gen, func(p *printer) { p.connected, p.client = false, nil })
 	if ctx.Err() == nil {
 		m.cfg.Log.Info("printer connection closed", "serial_tail", tail, "err", err)
 	}
@@ -793,7 +857,9 @@ func (m *Manager) applyReport(serial string, gen uint64, payload []byte) {
 	if !ok {
 		return
 	}
+	lu, _ := parseLive(payload)
 	m.with(serial, gen, func(p *printer) {
+		p.live.apply(lu)
 		p.lastReport = m.cfg.Now()
 		if u.gcodeState != nil {
 			p.gcodeState = *u.gcodeState

@@ -27,6 +27,7 @@ import (
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/logx"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/printers"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/redact"
+	"github.com/ArrowTech-Labs/spoken-parts-link/internal/sends"
 )
 
 //go:embed templates/*.html
@@ -53,6 +54,9 @@ type View struct {
 	CodesDamaged bool
 	Printers     []printers.Snapshot
 	Version      string
+	// 0.2: the active send per printer serial, and whether auto start is on.
+	Sends     map[string]sends.Status
+	AutoStart bool
 }
 
 // Controller is the app behind the page.
@@ -135,6 +139,14 @@ func New(ctrl Controller, opts Options) (*Server, error) {
 		"certText":   certText,
 		"shortFP":    shortFP,
 		"pct":        func(p *int) int { return *p },
+		"canStart":   canStartText,
+		"storage":    storageText,
+		"sendFor": func(m map[string]sends.Status, serial string) *sends.Status {
+			if st, ok := m[serial]; ok {
+				return &st
+			}
+			return nil
+		},
 	}).ParseFS(templateFS, "templates/*.html")
 	if err != nil {
 		return nil, err
@@ -453,4 +465,26 @@ func shortFP(fp string) string {
 		parts = append(parts, fp[i:i+4])
 	}
 	return strings.Join(parts, " ")
+}
+
+func canStartText(p printers.Snapshot, autoStart bool) string {
+	switch p.CanStart(autoStart) {
+	case "auto":
+		return "Yes. Developer Mode is on, so the link starts prints itself."
+	case "upload_only":
+		return "No, upload only. Someone taps the file on the printer screen (Cloud mode)."
+	default:
+		return "Not known yet"
+	}
+}
+
+func storageText(b *bool) string {
+	switch {
+	case b == nil:
+		return "Not known yet"
+	case *b:
+		return "USB stick or SD card in"
+	default:
+		return "No USB stick. Insert one so prints can be uploaded."
+	}
 }
