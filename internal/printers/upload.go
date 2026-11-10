@@ -168,6 +168,7 @@ func (m *Manager) UploadClean(ctx context.Context, serial, name string, r io.Rea
 	}
 	if err != nil {
 		m.cfg.Log.Info("upload to printer failed", "serial_tail", tail, "err", err)
+		_ = c.Delete("/" + name) // a partial file of ours, best effort
 		return nil, err
 	}
 	m.cfg.Log.Info("uploaded a file to the printer", "serial_tail", tail, "file", name, "bytes", size)
