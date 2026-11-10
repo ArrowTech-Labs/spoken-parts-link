@@ -139,6 +139,12 @@ network, or that name an address other than the sender's own.
 4. The link sees the print start and follows it to the end. When it ends, the
    link deletes the file it uploaded.
 
+Only one Spoken Parts file is on the USB stick at a time. Its name starts with
+`SP-`. Before each upload the link deletes the Spoken Parts files it uploaded
+to that printer before. It never deletes other files on the stick. To print
+something again, put it in the queue in Spoken Parts, not from the printer's
+storage list.
+
 If the printer has no USB stick, Spoken Parts says "Insert a USB stick" for
 that printer. Insert one and tap Try again on the phone.
 

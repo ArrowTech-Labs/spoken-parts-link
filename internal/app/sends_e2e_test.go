@@ -810,3 +810,51 @@ func TestTheNextUploadRemovesTheLastOneAcrossARestart(t *testing.T) {
 		return len(sp) == 1 && sp[0] == "SP-0a1b2c40-SP1054-P1.gcode.3mf"
 	})
 }
+
+// STEER 3: the X2D dry run against the fake printer. The old SP file goes, a
+// file someone else put on the stick stays, exactly one SP file is there for
+// the person to find, nothing is ever started (even with every auto start
+// switch on), and End dry run makes the link delete its file.
+func TestX2DDryRun(t *testing.T) {
+	w := newSendsWorld(t, devFun, true, true)
+	w.broker.SetMode("developer", 10*time.Millisecond)
+	old := "SP-11111111-Prev-P1.gcode.3mf"
+	foreign := "my-own-model.gcode.3mf"
+	w.ftp.Put(old, []byte("old"))
+	w.ftp.Put(foreign, []byte("mine"))
+	writeManifest(t, w.dir, map[string][]sends.ManifestEntry{serial: {{FileName: old, SendID: "x", Size: 3}}})
+	w.restart()
+	fs := w.sa.add(w.file, func(f *fakeSend) { f.send.AutoStart, f.send.DryRun = true, true })
+	w.waitState(fs.send.ID, "uploaded")
+	var sp []string
+	for n := range w.ftp.Files() {
+		if strings.HasPrefix(n, "SP-") {
+			sp = append(sp, n)
+		}
+	}
+	if len(sp) != 1 || sp[0] != fileName {
+		t.Fatalf("SP files on the stick: %v", sp)
+	}
+	if _, ok := w.ftp.Files()[foreign]; !ok {
+		t.Fatal("a file the link did not upload was deleted")
+	}
+	if got := w.sa.lastState(fs.send.ID, "uploaded").Others; len(got) != 0 {
+		t.Fatalf("others %v", got)
+	}
+	time.Sleep(150 * time.Millisecond)
+	if w.projectFiles() != 0 {
+		t.Fatal("a dry run sent project_file")
+	}
+	// End dry run in Spoken Parts: the send is cancelled; the link deletes its file.
+	w.sa.set(fs, func(f *fakeSend) { f.state = "cancelled" })
+	waitFor(t, "file deleted", func() bool { _, ok := w.ftp.Files()[fileName]; return !ok })
+	if _, ok := w.ftp.Files()[foreign]; !ok {
+		t.Fatal("foreign file gone")
+	}
+	for _, p := range w.broker.Publishes() {
+		if p.Payload != mqtt.PushAllPayload {
+			t.Fatalf("printer got %q", p.Payload)
+		}
+	}
+	waitFor(t, "spool empty", func() bool { return len(w.spoolFiles()) == 0 })
+}

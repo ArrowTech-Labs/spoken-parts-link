@@ -13,8 +13,16 @@
 - If someone starts a different file, or the printer uses an AMS slot the plate
   should not use, Spoken Parts is told so a person can stop it. The link
   cannot pause or stop a print.
-- After the print, the link deletes the file it uploaded. It only deletes files
-  it uploaded itself (their names start with SP).
+- Only one Spoken Parts file is on a printer's USB stick at a time, so nobody
+  taps an old one. Files the link uploads are named `SP-` plus a short id and
+  the plate. Before an upload the link deletes the files it uploaded to that
+  printer earlier, and after the print it deletes the new one. It keeps a list
+  of the files it uploaded, and it never deletes a file that is not on that
+  list, a file someone else put on the stick, or the file of a print that is
+  running. If an old file can't be deleted, Spoken Parts names it so the right
+  one is tapped.
+- Owners can run a dry run: the whole delivery without printing (no project
+  start, ever), for testing a printer.
 - If the printer has no USB stick, the link says so and waits until someone
   inserts one and taps Try again in Spoken Parts.
 - The upload uses the printer's own FTPS server (port 990) with the same

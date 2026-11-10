@@ -449,7 +449,7 @@ func newRecord(s api.Send) *record {
 		SHA256:    strings.ToLower(s.SHA256),
 		Plate:     s.PlateIndex,
 		Mapping:   s.Mapping,
-		AutoStart: s.AutoStart,
+		AutoStart: s.AutoStart && !s.DryRun, // a dry run never starts
 		Options:   s.Options,
 	}
 }

@@ -151,7 +151,8 @@ on the printer: the link deletes only files it uploaded itself.
 | Wrong file started | The link tells Spoken Parts which file started. A different file is reported as the wrong file, and the worker and owner are told. |
 | Wrong filament slots | Spoken Parts plans each filament's AMS slot from the link's own AMS report, and the phone checks each swap against it. After the start, the link compares the printer's mapping in use with the plan and raises an alert on a mismatch. The link cannot stop the print; a person stops it on the printer screen. |
 | Double start | In Cloud mode the link starts nothing. With auto start on, a start is recorded on disk before it is sent and is sent at most once per send, and once per MQTT session, so a restart never starts a print twice. |
-| Files left behind | Files wait in `/data/spool` (0600) and are deleted after the print, after a failure, and when the link is removed. On the printer the link deletes its own file after the print. |
+| Files left behind | Files wait in `/data/spool` (0600) and are deleted after the print, after a failure, and when the link is removed. On the printer the link deletes its own file after the print, and before each upload it deletes the earlier files it uploaded there, so only one Spoken Parts file is on the stick. |
+| Deleting someone's files | The link deletes only reserved `SP-<id>-<plate>.gcode.3mf` names that are in its own manifest (`/data/state/storage.json`) with the recorded size, and never the running print's file. Anything else on the stick is never touched. |
 | Printer busy or in trouble | The link uploads only to a printer that is not printing, has storage and reports no serious error. |
 
 ### 4.9 Supply chain (B4)

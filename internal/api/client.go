@@ -288,9 +288,11 @@ type Send struct {
 	SHA256      string      `json:"sha256"`
 	Mapping     []MapRow    `json:"mapping"`
 	AutoStart   bool        `json:"autostart"`
-	Options     SendOptions `json:"options"`
-	FileURL     string      `json:"file_url"`
-	FileToken   string      `json:"file_token"`
+	// DryRun: an owner's test. Never started, whatever else allows it.
+	DryRun    bool        `json:"dry_run"`
+	Options   SendOptions `json:"options"`
+	FileURL   string      `json:"file_url"`
+	FileToken string      `json:"file_token"`
 }
 
 // StateRequest is the body of POST sends/<id>/state.
