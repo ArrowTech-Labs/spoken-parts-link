@@ -171,6 +171,15 @@ func New(cfg Config) (*Runner, error) {
 			r.recs[rec.ID] = rec
 		}
 	}
+	// Spool files with no record (a crash during a download) are swept.
+	if entries, err := os.ReadDir(cfg.SpoolDir); err == nil {
+		for _, e := range entries {
+			id := strings.TrimSuffix(e.Name(), ".gcode.3mf")
+			if _, ok := r.recs[id]; !ok {
+				removeSpool(filepath.Join(cfg.SpoolDir, e.Name()))
+			}
+		}
+	}
 	if r.cfg.ManifestPath == "" {
 		r.cfg.ManifestPath = filepath.Join(filepath.Dir(cfg.StatePath), "storage.json")
 	}
@@ -200,18 +209,25 @@ func (r *Runner) saveManifestLocked() {
 // removable says whether an earlier file on the printer may be deleted: a
 // reserved name the link uploaded itself (in the manifest), the size it
 // recorded, and not the file of a print that is running now.
-func (r *Runner) removable(serial string, snap printers.Snapshot) func(string, int64) bool {
+func (r *Runner) removable(serial string, _ printers.Snapshot) func(string, int64) bool {
 	return func(name string, size int64) bool {
 		if !fileNameRe.MatchString(name) {
 			return false
 		}
-		if snap.Busy() && matches(&record{Subtask: strings.TrimSuffix(name, ".gcode.3mf")}, snap) {
+		// The printer as it is now (a download can take minutes), not as it was.
+		if now, ok := r.cfg.Printers.Get(serial); !ok || (now.Busy() && matches(&record{Subtask: strings.TrimSuffix(name, ".gcode.3mf")}, now)) {
 			return false
 		}
 		r.mu.Lock()
 		defer r.mu.Unlock()
+		for _, rec := range r.recs {
+			// Another send still waiting for its tap, or printing: never its file.
+			if rec.FileName == name && (rec.Phase == phaseUploaded || rec.Phase == phaseStarted) {
+				return false
+			}
+		}
 		for _, e := range r.files[serial] {
-			if e.FileName == name && (e.Size <= 0 || e.Size == size) {
+			if e.FileName == name && e.Size > 0 && e.Size == size {
 				return true
 			}
 		}
@@ -285,9 +301,13 @@ func (r *Runner) Reset() {
 func (r *Runner) wipeSpoolLocked() {
 	entries, _ := os.ReadDir(r.cfg.SpoolDir)
 	for _, e := range entries {
-		_ = fsutil.Wipe(filepath.Join(r.cfg.SpoolDir, e.Name()))
+		removeSpool(filepath.Join(r.cfg.SpoolDir, e.Name()))
 	}
 }
+
+// removeSpool deletes a spool file. Print files hold no secrets, so a plain
+// remove is enough (no overwrite: files can be hundreds of MB on a Pi).
+func removeSpool(path string) { _ = os.Remove(path) }
 
 func (r *Runner) spool(id string) string { return filepath.Join(r.cfg.SpoolDir, id+".gcode.3mf") }
 
@@ -404,6 +424,11 @@ func (r *Runner) poll(ctx context.Context) bool {
 			r.busy[s.ID] = true
 			r.saveLocked()
 			r.goDeliver(ctx, s, gen)
+		case rec != nil && rec.Phase == phaseDownloaded && !rec.WaitingRetry:
+			// Downloaded but not uploaded (a restart mid-upload): upload it again
+			// from the spool (or download again if the spool file is gone).
+			r.busy[s.ID] = true
+			r.goDeliver(ctx, s, gen)
 		}
 		r.mu.Unlock()
 	}
@@ -422,8 +447,14 @@ func (r *Runner) poll(ctx context.Context) bool {
 	}
 	r.mu.Unlock()
 	for _, rec := range gone {
-		_ = fsutil.Wipe(r.spool(rec.ID))
+		removeSpool(r.spool(rec.ID))
 		if rec.Phase == phaseUploaded {
+			if now, ok := r.cfg.Printers.Get(rec.Serial); ok && now.Busy() && matches(rec, now) {
+				// It is printing (the delivered report was lost): leave the file; the
+				// next upload to this printer removes it once it is free.
+				r.cfg.Log.Warn("a closed send is printing on the printer, its file stays for now", "send", rec.ID[:8])
+				continue
+			}
 			r.removeFromPrinter(ctx, rec)
 		}
 		r.cfg.Log.Info("send closed in Spoken Parts, stopped", "send", rec.ID[:8])
@@ -468,8 +499,12 @@ func (r *Runner) state(ctx context.Context, id string, req api.StateRequest) err
 func (r *Runner) failFinal(ctx context.Context, s api.Send, reason string) {
 	r.cfg.Log.Warn("send failed", "send", s.ID[:8], "serial_tail", ssdp.Tail(s.Printer.Serial), "reason", reason)
 	_ = r.state(ctx, s.ID, api.StateRequest{State: "failed", Reason: reason})
-	_ = fsutil.Wipe(r.spool(s.ID))
+	removeSpool(r.spool(s.ID))
 	r.mu.Lock()
+	if !r.enabled { // the link was reset meanwhile: keep nothing from before
+		r.mu.Unlock()
+		return
+	}
 	delete(r.recs, s.ID)
 	r.errs[s.Printer.Serial] = reason
 	r.saveLocked()
@@ -481,6 +516,10 @@ func (r *Runner) uploadFailed(ctx context.Context, s api.Send, rec *record, code
 	r.cfg.Log.Info("upload waits for the worker", "send", s.ID[:8], "code", code)
 	_ = r.state(ctx, s.ID, api.StateRequest{State: "upload_failed", Code: code, Reason: reason})
 	r.mu.Lock()
+	if !r.enabled { // the link was reset meanwhile: keep nothing from before
+		r.mu.Unlock()
+		return
+	}
 	if rec == nil {
 		rec = newRecord(s)
 	}
@@ -534,7 +573,9 @@ func (r *Runner) deliver(ctx context.Context, s api.Send, gen uint64) {
 	}
 	path := r.spool(s.ID)
 	if rec == nil || rec.MD5 == "" || !exists(path) {
-		if time.Duration(s.AgeS)*time.Second > r.cfg.MaxAge {
+		// The 30 minute rule is for a fresh send. A send the worker retried (it has a
+		// record) goes on.
+		if rec == nil && time.Duration(s.AgeS)*time.Second > r.cfg.MaxAge {
 			r.failFinal(ctx, s, "This send is older than 30 minutes. Send it again in Spoken Parts.")
 			return
 		}
@@ -556,7 +597,7 @@ func (r *Runner) deliver(ctx context.Context, s api.Send, gen uint64) {
 		r.mu.Lock()
 		if r.gen != gen {
 			r.mu.Unlock()
-			_ = fsutil.Wipe(path)
+			removeSpool(path)
 			return
 		}
 		r.recs[s.ID] = rec
@@ -605,17 +646,17 @@ func (r *Runner) download(ctx context.Context, s api.Send, path string) (*threem
 		err = cerr
 	}
 	if err != nil {
-		_ = fsutil.Wipe(path)
+		removeSpool(path)
 		return nil, err
 	}
 	want := strings.ToLower(s.SHA256)
 	if want == "" || sum != want || (header != "" && header != want) {
-		_ = fsutil.Wipe(path)
+		removeSpool(path)
 		return nil, errChecksum
 	}
 	info, err := threemf.Check(path, max(s.PlateIndex, 1))
 	if err != nil {
-		_ = fsutil.Wipe(path)
+		removeSpool(path)
 		return nil, errBadFile
 	}
 	return info, nil
@@ -624,11 +665,14 @@ func (r *Runner) download(ctx context.Context, s api.Send, path string) (*threem
 func (r *Runner) upload(ctx context.Context, s api.Send, rec *record, path string, snap printers.Snapshot) ([]string, error) {
 	f, err := os.Open(path)
 	if err != nil {
+		removeSpool(path)
+		r.uploadFailed(ctx, s, nil, "", "The downloaded file could not be read on the link.")
 		return nil, err
 	}
 	defer f.Close()
 	st, err := f.Stat()
 	if err != nil {
+		r.uploadFailed(ctx, s, rec, "", "The downloaded file could not be read on the link.")
 		return nil, err
 	}
 	zero := 0
@@ -805,7 +849,7 @@ func (r *Runner) watchStart(ctx context.Context, rec *record, snap printers.Snap
 	rec.Phase, rec.StartedAt = phaseStarted, r.cfg.Now()
 	r.saveLocked()
 	r.mu.Unlock()
-	_ = fsutil.Wipe(r.spool(rec.ID)) // on the printer now
+	removeSpool(r.spool(rec.ID)) // on the printer now
 	r.track(ctx, rec, snap)
 }
 
@@ -881,7 +925,7 @@ func (r *Runner) track(ctx context.Context, rec *record, snap printers.Snapshot)
 		delete(r.recs, rec.ID)
 		r.saveLocked()
 		r.mu.Unlock()
-		_ = fsutil.Wipe(r.spool(rec.ID))
+		removeSpool(r.spool(rec.ID))
 		r.cfg.Log.Info("print ended, send closed", "send", rec.ID[:8], "state", snap.GcodeState)
 	}
 }

@@ -861,3 +861,47 @@ func TestX2DDryRun(t *testing.T) {
 	}
 	waitFor(t, "spool empty", func() bool { return len(w.spoolFiles()) == 0 })
 }
+
+// Review fixes (0.2.1).
+
+func TestASecondSendNeverDeletesTheFirstSendsFile(t *testing.T) {
+	w := newSendsWorld(t, cloudFun, true, false)
+	a := w.sa.add(w.file)
+	w.waitState(a.send.ID, "uploaded") // A waits for its tap
+	b := w.sa.add(w.file, func(f *fakeSend) {
+		f.send.FileName = "SP-0a1b2c3f-SP1053-P1.gcode.3mf"
+		f.send.SubtaskName = "SP-0a1b2c3f-SP1053-P1"
+	})
+	w.waitState(b.send.ID, "uploaded")
+	if _, ok := w.ftp.Files()[fileName]; !ok {
+		t.Fatal("the second upload deleted the first send's file")
+	}
+	if got := w.sa.lastState(b.send.ID, "uploaded").Others; len(got) != 1 || got[0] != fileName {
+		t.Fatalf("others %v", got)
+	}
+}
+
+func TestADownloadedSendIsUploadedAfterARestart(t *testing.T) {
+	w := newSendsWorld(t, cloudFun, true, false)
+	fs := w.sa.add(w.file)
+	w.waitState(fs.send.ID, "uploaded")
+	// As if the link stopped after the download, before the upload.
+	w.h.stop()
+	id := fs.send.ID
+	rec := []map[string]any{{"id": id, "serial": serial, "file_name": fileName, "subtask": subtask, "sha256": w.file.SHA256, "md5": w.file.MD5, "plate": 1, "phase": "downloaded"}}
+	b, _ := json.Marshal(rec)
+	_ = os.WriteFile(filepath.Join(w.dir, "state", "sends.json"), b, 0o600)
+	_ = os.WriteFile(filepath.Join(w.dir, "spool", id+".gcode.3mf"), w.file.Data, 0o600)
+	_ = os.WriteFile(filepath.Join(w.dir, "spool", "00000000-0000-0000-0000-000000000000.gcode.3mf"), []byte("orphan"), 0o600)
+	w.sa.set(fs, func(f *fakeSend) { f.linkState = "uploading" })
+	before := strings.Count(strings.Join(w.sa.statesOf(id), ","), "uploaded")
+	w.restart()
+	waitFor(t, "uploaded again", func() bool {
+		return strings.Count(strings.Join(w.sa.statesOf(id), ","), "uploaded") > before
+	})
+	for _, f := range w.spoolFiles() {
+		if strings.HasPrefix(f, "00000000-") {
+			t.Fatal("orphan spool file kept")
+		}
+	}
+}

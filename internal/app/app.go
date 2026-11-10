@@ -572,11 +572,9 @@ func (l linkAPI) ListSends(ctx context.Context) ([]api.Send, error) {
 	if err != nil {
 		return nil, err
 	}
-	out, err := l.a.api.ListSends(ctx, s.key, s.linkID)
-	for i := range out {
-		l.a.red.AddTransient(out[i].FileToken)
-	}
-	return out, err
+	// File tokens are one-time and never logged. They are not added to the
+	// redactor's small ring, where they would push out the pairing codes.
+	return l.a.api.ListSends(ctx, s.key, s.linkID)
 }
 
 func (l linkAPI) Download(ctx context.Context, send api.Send, w io.Writer) (int64, string, string, error) {

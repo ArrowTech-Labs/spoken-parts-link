@@ -71,8 +71,8 @@ Release images are built and signed by GitHub Actions with keyless cosign. They
 also carry build provenance and an SBOM attestation.
 
 ```
-cosign verify ghcr.io/arrowtech-labs/spoken-parts-link:0.2.0 --certificate-identity-regexp '^https://github.com/ArrowTech-Labs/spoken-parts-link/.github/workflows/release.yml@refs/tags/v' --certificate-oidc-issuer https://token.actions.githubusercontent.com
-gh attestation verify oci://ghcr.io/arrowtech-labs/spoken-parts-link:0.2.0 --owner ArrowTech-Labs
+cosign verify ghcr.io/arrowtech-labs/spoken-parts-link:0.2.1 --certificate-identity-regexp '^https://github.com/ArrowTech-Labs/spoken-parts-link/.github/workflows/release.yml@refs/tags/v' --certificate-oidc-issuer https://token.actions.githubusercontent.com
+gh attestation verify oci://ghcr.io/arrowtech-labs/spoken-parts-link:0.2.1 --owner ArrowTech-Labs
 ```
 
 ## Build from source
@@ -81,7 +81,7 @@ Go 1.27.3 or newer. No third party Go modules are used.
 
 ```
 go test -race ./...
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -buildvcs=false -ldflags "-s -w -buildid= -X main.version=0.2.0" ./cmd/spoken-parts-link
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -buildvcs=false -ldflags "-s -w -buildid= -X main.version=0.2.1" ./cmd/spoken-parts-link
 docker buildx build -f spoken_parts_link/Dockerfile --platform linux/amd64,linux/arm64 .
 ```
 

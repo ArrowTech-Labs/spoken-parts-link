@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.1
+
+Fixes from a review before 0.2.0 was installed anywhere.
+
+- A new upload never deletes the file of another print that is still waiting
+  to be tapped, or that is printing. The printer is checked again right before
+  each delete.
+- A print that was downloaded but not uploaded when the link stopped is
+  uploaded when it starts again, instead of waiting forever.
+- Downloaded files are removed without first being overwritten, so a large
+  file no longer uses its whole size in memory on a Raspberry Pi.
+- When a print is closed in Spoken Parts while it is printing, its file stays
+  on the printer until the next upload.
+- Try again after a busy or unreachable printer works even if the print was
+  sent more than 30 minutes ago.
+- Leftover downloads from a crash are deleted when the link starts.
+- A half uploaded file is deleted from the printer after a failed upload.
+
 ## 0.2.0
 
 - Sends prints. When a print is sent to a printer in Spoken Parts, the link
