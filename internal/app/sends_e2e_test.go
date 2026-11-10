@@ -552,7 +552,10 @@ func TestExpiredTokenIsRetriedWithANewOne(t *testing.T) {
 	w.waitState(fs.send.ID, "uploaded")
 	w.sa.mu.Lock()
 	defer w.sa.mu.Unlock()
-	if w.sa.fileCalls != 2 {
+	// The first call is refused (expired). A list between a delivery's start and its
+	// download can rotate the token once more on a slow machine; either way the link
+	// keeps going with a fresh token until the file arrives.
+	if w.sa.fileCalls < 2 {
 		t.Fatalf("file calls %d", w.sa.fileCalls)
 	}
 }
