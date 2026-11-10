@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.2.0
+
+- Sends prints. When a print is sent to a printer in Spoken Parts, the link
+  gets the file, checks it (its checksum, and that it is a complete sliced
+  plate for this printer) and uploads it to the printer's USB stick.
+- Printers stay in Bambu's Cloud mode. Someone at the printer opens Storage on
+  the printer screen, taps the file Spoken Parts names and presses Print. The
+  phone shows the steps, and the exact file name, once the upload is done.
+- The link sees the print start on the printer and follows it to the end:
+  progress, layers, errors and the finish go to Spoken Parts.
+- If someone starts a different file, or the printer uses an AMS slot the plate
+  should not use, Spoken Parts is told so a person can stop it. The link
+  cannot pause or stop a print.
+- Only one Spoken Parts file is on a printer's USB stick at a time, so nobody
+  taps an old one. Files the link uploads are named `SP-` plus a short id and
+  the plate. Before an upload the link deletes the files it uploaded to that
+  printer earlier, and after the print it deletes the new one. It keeps a list
+  of the files it uploaded, and it never deletes a file that is not on that
+  list, a file someone else put on the stick, or the file of a print that is
+  running. If an old file can't be deleted, Spoken Parts names it so the right
+  one is tapped.
+- Owners can run a dry run: the whole delivery without printing (no project
+  start, ever), for testing a printer.
+- If the printer has no USB stick, the link says so and waits until someone
+  inserts one and taps Try again in Spoken Parts.
+- The upload uses the printer's own FTPS server (port 990) with the same
+  certificate check as before: the access code is only sent to a printer whose
+  certificate checks out.
+- The link page shows, per printer, whether a USB stick is in, how prints
+  start (upload only in Cloud mode), the print it is delivering and the last
+  delivery problem.
+- The only commands the link can send to a printer are the status request and,
+  only for printers in Developer Mode and only if auto start is turned on, a
+  start for a file it uploaded. Auto start is off and is not an app option.
+- Downloaded files wait in the app's private data folder and are deleted after
+  the print, after a failure, or when the link is removed.
+
 ## 0.1.1
 
 - The link page opens on the code field until the link is connected. The

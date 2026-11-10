@@ -37,7 +37,7 @@
 
 <section aria-labelledby="printers-h">
 <h2 id="printers-h">Printers</h2>
-<p>Printers on this network. Type each one's access code. We keep it here and never send it to Spoken Parts.</p>
+<p>Printers on this network. Type each one's access code. We keep it here and never send it to Spoken Parts. Prints from Spoken Parts are uploaded to the printer's USB stick, then someone taps the file on the printer screen.</p>
 {{if ne .Phase "active"}}<p class="mut">Connect to Spoken Parts first. Then you can type access codes.</p>{{end}}
 {{if not .Printers}}<p class="mut">Looking for printers. Make sure they are turned on and on the same network as Home Assistant.</p>{{end}}
 {{range .Printers}}
@@ -50,7 +50,14 @@
 <dt>State</dt><dd>{{gcode .GcodeState}}{{if .Percent}}, {{pct .Percent}} percent{{end}}{{if .RemainingMin}}, about {{pct .RemainingMin}} minutes left{{end}}</dd>
 <dt>Access code</dt><dd>{{accessText .Access}}</dd>
 <dt>Certificate</dt><dd>{{certText .Cert}}</dd>
+<dt>Storage</dt><dd>{{storage .Storage}}</dd>
+<dt>Can start prints</dt><dd>{{canStart . $.AutoStart}}</dd>
+{{if and .Layer .TotalLayers}}<dt>Layer</dt><dd>{{pct .Layer}} of {{pct .TotalLayers}}</dd>{{end}}
 </dl>
+{{with sendFor $.Sends .Serial}}
+{{if .FileName}}<p class="note">Print from Spoken Parts: <code>{{.FileName}}</code>. {{.Text}}</p>{{end}}
+{{if .LastError}}<p class="note warn">Last delivery problem: {{.LastError}}</p>{{end}}
+{{end}}
 {{if .Spoofed}}<p class="note warn">Something on your network answered for this printer with a different certificate. We did not send the access code.</p>{{end}}
 {{if and .Candidate (not .Known) (eq (printf "%s" .Cert) "untrusted")}}
 <form method="post" action="{{$.Base}}/trust">

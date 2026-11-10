@@ -337,7 +337,7 @@ func TestChangedCertificateNeverOffersTrust(t *testing.T) {
 var autofocusRe = regexp.MustCompile(`<input[^>]*\sautofocus[^>]*>`)
 
 func TestUnpairedPageLandsOnCodeEntry(t *testing.T) {
-	v := View{Phase: PhaseUnpaired, Notice: MsgTimedOut, Version: "0.1.1"}
+	v := View{Phase: PhaseUnpaired, Notice: MsgTimedOut, Version: "0.2.0"}
 	v.Printers = activeView.Printers
 	_, _, h, _ := newServer(t, v)
 	page := do(h, "GET", "/", ingress, nil, nil).Body.String()

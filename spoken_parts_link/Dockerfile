@@ -1,6 +1,6 @@
 # Spoken Parts Link image. Build from the repository root, for example:
 #   docker buildx build -f spoken_parts_link/Dockerfile \
-#     --platform linux/amd64,linux/arm64 --build-arg VERSION=0.1.1 .
+#     --platform linux/amd64,linux/arm64 --build-arg VERSION=0.2.0 .
 #
 # build.yaml is deprecated (2026-04), so the base image, arguments and labels
 # all live here. The builder image is pinned by digest.
@@ -10,7 +10,7 @@ ARG GO_IMAGE=golang:1.27-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c
 FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS build
 ARG TARGETOS=linux
 ARG TARGETARCH
-ARG VERSION=0.1.1
+ARG VERSION=0.2.0
 WORKDIR /src
 COPY go.mod ./
 COPY cmd ./cmd
@@ -26,15 +26,15 @@ FROM scratch AS base-arm64
 LABEL io.hass.arch="aarch64"
 
 FROM base-${TARGETARCH}
-ARG VERSION=0.1.1
+ARG VERSION=0.2.0
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /out/spoken-parts-link /usr/bin/spoken-parts-link
 LABEL io.hass.type="addon" \
       io.hass.name="Spoken Parts Link" \
-      io.hass.description="Shows the status of your Bambu Lab printers in Spoken Parts." \
+      io.hass.description="Sends prints from Spoken Parts to your Bambu Lab printers and shows their status." \
       io.hass.version="${VERSION}" \
       org.opencontainers.image.title="Spoken Parts Link" \
-      org.opencontainers.image.description="Shows the status of your Bambu Lab printers in Spoken Parts." \
+      org.opencontainers.image.description="Sends prints from Spoken Parts to your Bambu Lab printers and shows their status." \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.vendor="ArrowTech Labs" \
       org.opencontainers.image.url="https://spokenparts.com" \

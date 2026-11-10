@@ -15,7 +15,7 @@ import (
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/fsutil"
 )
 
-// Drop runs as root only. It creates dataDir/{identity,secrets,state} with
+// Drop runs as root only. It creates dataDir/{identity,secrets,state,spool} with
 // mode 0700, chowns them and everything inside to uid:gid, then drops all
 // groups and switches to gid and uid. If the process is not root (a dev
 // run) it does nothing.
@@ -37,7 +37,7 @@ func Drop(dataDir string, uid, gid int) (bool, error) {
 			return false, fmt.Errorf("making %s passable: %w", dataDir, err)
 		}
 	}
-	for _, d := range []string{"identity", "secrets", "state"} {
+	for _, d := range []string{"identity", "secrets", "state", "spool"} {
 		dir := filepath.Join(dataDir, d)
 		if err := fsutil.EnsureDir(dir); err != nil {
 			return false, err

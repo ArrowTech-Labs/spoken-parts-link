@@ -1,9 +1,11 @@
-// Command spoken-parts-link is the Spoken Parts network link (status only).
+// Command spoken-parts-link is the Spoken Parts network link.
 //
 // It listens for Bambu Lab printers on the local network, reads their status
 // over MQTT with the access codes the owner typed on its Home Assistant page,
-// and reports that status to Spoken Parts over signed HTTPS requests. It
-// opens no port to the internet and never sends access codes anywhere.
+// uploads the prints Spoken Parts sends to the printer's storage over FTPS,
+// and reports status and progress to Spoken Parts over signed HTTPS
+// requests. It opens no port to the internet and never sends access codes
+// anywhere but to the printer they belong to.
 package main
 
 import (
@@ -29,7 +31,7 @@ import (
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
-var version = "0.1.1-dev"
+var version = "0.2.0-dev"
 
 // The unprivileged user the link runs as after start.
 const (
@@ -83,6 +85,8 @@ func run() error {
 		Server:  cfg.Server,
 		Log:     lg,
 		Bundle:  bundle,
+		// Off unless SP_LINK_AUTOSTART=true (Developer Mode printers only).
+		AutoStart: cfg.AutoStart,
 	})
 	if err != nil {
 		return err

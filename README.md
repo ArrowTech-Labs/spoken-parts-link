@@ -4,8 +4,11 @@ Spoken Parts Link is a small program that connects the Bambu Lab printers at a
 print farm to [Spoken Parts](https://spokenparts.com). It runs as a Home
 Assistant app (add-on) on a computer at the site, such as a Raspberry Pi.
 
-Version 0.1 is status only. It reads what each printer is doing and reports it
-to Spoken Parts. It does not start, pause or stop prints.
+It reads what each printer is doing and reports it to Spoken Parts. From
+version 0.2 it also uploads the prints Spoken Parts sends to the printer's USB
+stick (FTPS), sees them start when someone taps the file on the printer screen,
+and reports their progress until they finish. Printers stay in Bambu's Cloud
+mode. The link never pauses, stops or moves a printer.
 
 ## Install
 
@@ -35,8 +38,20 @@ is also the app's Documentation tab in Home Assistant.
   by Bambu Lab and names the printer's serial before it sends the access code.
   A printer that passed this check once is never offered for manual trust
   again.
-  The only message it ever sends to a printer is the standard "pushall" status
-  request, at most once every 5 minutes.
+  The only MQTT message it sends to a printer is the standard "pushall" status
+  request, at most once every 5 minutes. (A `project_file` start exists for
+  printers in Developer Mode, behind `SP_LINK_AUTOSTART`, which is off. It is
+  not an app option.) The allowed commands are one constant,
+  `mqtt.AllowedCommands`, and a repository test fails if any other printer
+  command appears in the code.
+- **Sending prints.** The link polls Spoken Parts for sends (signed, outgoing
+  only). It downloads each file once with a one-time token sent in a header,
+  checks its SHA-256 and that it is a complete sliced plate (G-code md5), then
+  uploads it over implicit FTPS on port 990: TLS 1.2, the same Bambu CA and
+  serial check as MQTT before the access code is sent, and the data connection
+  resumes the control connection's TLS session. It sees the print start in the
+  printer's report and sends progress events until the print ends, then
+  deletes its own file (names `SP<printer>-...gcode.3mf` only).
 - **Access codes.** You type them on the link page. They are stored in
   `/data/secrets/codes.enc`, encrypted with AES-256-GCM. The key is derived
   from a secret on the device and a key that Spoken Parts gives only to this
@@ -56,8 +71,8 @@ Release images are built and signed by GitHub Actions with keyless cosign. They
 also carry build provenance and an SBOM attestation.
 
 ```
-cosign verify ghcr.io/arrowtech-labs/spoken-parts-link:0.1.1 --certificate-identity-regexp '^https://github.com/ArrowTech-Labs/spoken-parts-link/.github/workflows/release.yml@refs/tags/v' --certificate-oidc-issuer https://token.actions.githubusercontent.com
-gh attestation verify oci://ghcr.io/arrowtech-labs/spoken-parts-link:0.1.1 --owner ArrowTech-Labs
+cosign verify ghcr.io/arrowtech-labs/spoken-parts-link:0.2.0 --certificate-identity-regexp '^https://github.com/ArrowTech-Labs/spoken-parts-link/.github/workflows/release.yml@refs/tags/v' --certificate-oidc-issuer https://token.actions.githubusercontent.com
+gh attestation verify oci://ghcr.io/arrowtech-labs/spoken-parts-link:0.2.0 --owner ArrowTech-Labs
 ```
 
 ## Build from source
@@ -66,7 +81,7 @@ Go 1.27.3 or newer. No third party Go modules are used.
 
 ```
 go test -race ./...
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -buildvcs=false -ldflags "-s -w -buildid= -X main.version=0.1.1" ./cmd/spoken-parts-link
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -buildvcs=false -ldflags "-s -w -buildid= -X main.version=0.2.0" ./cmd/spoken-parts-link
 docker buildx build -f spoken_parts_link/Dockerfile --platform linux/amd64,linux/arm64 .
 ```
 
@@ -79,6 +94,7 @@ For development the program reads these environment variables:
 | `SP_LINK_ALLOW` | `172.30.32.2` | Comma separated source IPs allowed to open the page. |
 | `SP_LINK_DATA` | `/data` | Data folder. |
 | `SP_LINK_SSDP` | `0.0.0.0:2021` | Discovery port. |
+| `SP_LINK_AUTOSTART` | off | `true` lets the link start prints on Developer Mode printers. Not an app option. |
 
 ## Repository layout
 
@@ -87,7 +103,8 @@ repository.yaml              Home Assistant app repository
 spoken_parts_link/           the app: config.yaml, Dockerfile, AppArmor profile, docs
 cmd/spoken-parts-link/       main program
 internal/                    identity, signing, API client, encrypted store,
-                             discovery, MQTT client, printers, web page, app
+                             discovery, MQTT client, printers, FTPS client,
+                             3MF check, sends, web page, app
 internal/printers/ca/        public Bambu Lab CA certificates (see SOURCES.md)
 ```
 

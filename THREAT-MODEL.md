@@ -1,6 +1,7 @@
 # Threat model: Spoken Parts Link
 
-This covers the link program in this repository (version 0.1, status only), its
+This covers the link program in this repository (version 0.2: status, and
+uploading the prints Spoken Parts sends), its
 pairing with Spoken Parts, the data it keeps on the device, and how release
 images are built. It is written for customers, auditors and contributors.
 
@@ -12,11 +13,17 @@ images are built. It is written for customers, auditors and contributors.
    site X" to Spoken Parts. Stored as a plain file (see 4.5).
 3. **The local secret.** 32 random bytes that, together with a key from Spoken
    Parts, open the access code file. Stored as a plain file (see 4.5).
-4. **Printer control.** In version 0.1 the link sends nothing to a printer
-   except the standard status request, so it cannot be used to control one.
+4. **Printer control.** From version 0.2 the link puts files on a printer's
+   storage, and a person starts them on the printer screen. A wrong file, a
+   file for another printer, or the wrong filament slots could waste material
+   or damage a print. The link still cannot pause, stop, move, heat or
+   configure a printer. Printers stay in Bambu's Cloud mode, where only Bambu's
+   own apps or a person at the printer can start a print.
 5. **Status data.** What each printer is doing. Low sensitivity, but it shows
    business volume.
 6. **The release pipeline.** Whatever it ships runs on customer networks.
+7. **Print files.** The sliced files Spoken Parts sends. They are customers'
+   parts, so they are kept only while they are delivered.
 
 ## 2. Who might attack
 
@@ -63,7 +70,8 @@ images are built. It is written for customers, auditors and contributors.
 | Fake printer broadcast | Printers are keyed by serial. Before sending an access code the link requires the printer's TLS certificate to chain to a bundled Bambu Lab CA and to name the serial. A fake printer fails this, so it never receives the code. |
 | Fake printer for a known serial | The link remembers, per serial, the certificate that last passed the CA check. For such a serial it never offers manual trust: a certificate that fails is shown as changed, nothing is sent, the session goes back to the last good address and keeps checking. The owner's only way back is to remove the printer and add it again. |
 | Unknown or new printer CA | Only for a serial that never passed the check: the link shows "We couldn't check this printer's certificate." and sends nothing. The owner can trust that exact certificate by hand. If it later changes, it is treated as above. A certificate that fails only on its dates (a wrong clock on this device) is retried, never offered for trust. |
-| Sniffing | MQTT runs over TLS 1.2. The access code is only sent inside that session. |
+| Sniffing | MQTT and FTPS run over TLS 1.2. The access code is only sent inside those sessions. |
+| Fake printer for uploads | The FTPS upload (port 990) checks the printer's certificate the same way as MQTT (Bambu CA and the serial, or the certificate the MQTT session already checked) before the access code is sent. The data connection resumes the checked control session. The address from the server's PASV answer is ignored: data goes to the printer's own address only. |
 | LAN device opens the link page | The page binds to the Supervisor interface (172.30.32.1) and refuses any source other than the ingress proxy (172.30.32.2). |
 | Discovery abuse | The link only listens. Packets over 2 KiB are dropped and fields are validated. The announced address must be the sender's own, on a private LAN range (RFC 1918 or IPv6 ULA). Each source and all sources together are rate limited, and a full source table never resets a limited source. A printer's address changes at most once a minute, never while a checked session is up, and an address that flips back is held for 5 minutes. Unconfigured printers are forgotten after a day, and the list is capped. |
 | Printer overload | One session per printer, and one status request at connect, at most every 5 minutes. A wrong access code is not retried until a new one is saved. |
@@ -120,12 +128,34 @@ device and pair it again.
 
 ### 4.7 Compromised Spoken Parts backend
 
-In version 0.1 a compromised backend can see status data and can stop links (by
-revoking them). It cannot read access codes: they are never sent. It cannot
-control printers through the link: the link sends nothing to a printer except
-the status request, and the MQTT client has no general publish function.
+A compromised backend can see status data and can stop links (by revoking them).
+It cannot read access codes: they are never sent. From version 0.2 it can put a
+file on a printer's USB stick, with a name the link chooses the shape of
+(`SP<printer>-...gcode.3mf`). It cannot start that file: printers stay in Cloud
+mode, and a person must tap it on the printer screen. Auto start exists only
+for Developer Mode printers, behind an option that is off and is not an app
+option. It cannot send any other command: the MQTT client has no general
+publish function, the allowed commands are a constant
+(`mqtt.AllowedCommands`: pushall and project_file), and a repository test fails
+if any other printer command appears in the code. It cannot delete other files
+on the printer: the link deletes only files it uploaded itself.
 
-### 4.8 Supply chain (B4)
+### 4.8 Sending prints (B1, B2)
+
+| Threat | Mitigation |
+|---|---|
+| Forged send | Sends are only read from Spoken Parts over the signed link API (outgoing HTTPS, no new port). Spoken Parts only lists sends for printers of the link's own site that the link itself reported, and only to the paired link key. |
+| Stolen file link | Each file is fetched once with a one-time token that lasts 30 minutes. The token goes in a header, never in a URL, so it is not in proxy or server logs. The link registers it with the log redactor. |
+| File tampering | The link checks the file's SHA-256 against the send and the server's header, then that it is a zip with the plate's G-code and that the G-code matches the md5 Studio wrote. A mismatch fails the send; nothing is uploaded. Files over 512 MB are refused. |
+| Wrong printer | A send names the printer's serial and model. The link uploads only to that serial, only if the model matches what the printer announces, and only over a session whose certificate names that serial. |
+| Wrong file started | The link tells Spoken Parts which file started. A different file is reported as the wrong file, and the worker and owner are told. |
+| Wrong filament slots | Spoken Parts plans each filament's AMS slot from the link's own AMS report, and the phone checks each swap against it. After the start, the link compares the printer's mapping in use with the plan and raises an alert on a mismatch. The link cannot stop the print; a person stops it on the printer screen. |
+| Double start | In Cloud mode the link starts nothing. With auto start on, a start is recorded on disk before it is sent and is sent at most once per send, and once per MQTT session, so a restart never starts a print twice. |
+| Files left behind | Files wait in `/data/spool` (0600) and are deleted after the print, after a failure, and when the link is removed. On the printer the link deletes its own file after the print, and before each upload it deletes the earlier files it uploaded there, so only one Spoken Parts file is on the stick. |
+| Deleting someone's files | The link deletes only reserved `SP-<id>-<plate>.gcode.3mf` names that are in its own manifest (`/data/state/storage.json`) with the recorded size, and never the running print's file. Anything else on the stick is never touched. |
+| Printer busy or in trouble | The link uploads only to a printer that is not printing, has storage and reports no serious error. |
+
+### 4.9 Supply chain (B4)
 
 | Threat | Mitigation |
 |---|---|
@@ -150,5 +180,9 @@ the status request, and the MQTT client has no general publish function.
 6. **Anyone on the LAN with an access code** can control that printer directly.
    This is how Bambu Lab LAN access works. Keep printers on a trusted network
    and change access codes when people or devices leave.
-7. **Host compromise.** An app with full access, or a compromise of the Home
+7. **A person starts the wrong thing.** In Cloud mode a person taps the file. The
+   link reports a wrong file or wrong slot, but cannot stop the print.
+8. **Files on the USB stick.** Anyone at the printer can read the uploaded file
+   until the print ends and the link deletes it.
+9. **Host compromise.** An app with full access, or a compromise of the Home
    Assistant host, can read everything on that host, including this app's data.

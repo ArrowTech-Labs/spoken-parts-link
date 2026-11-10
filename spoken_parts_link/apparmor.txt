@@ -13,7 +13,8 @@ profile spoken_parts_link flags=(attach_disconnected,mediate_deleted) {
   capability setuid,
   capability setgid,
 
-  # HTTPS to Spoken Parts, MQTT over TLS to printers, the discovery listener
+  # HTTPS to Spoken Parts, MQTT over TLS and FTPS uploads (port 990) to
+  # printers, the discovery listener
   # on UDP 2021 and the ingress page. Go lists interfaces over netlink.
   network inet stream,
   network inet dgram,
