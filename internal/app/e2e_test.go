@@ -52,6 +52,7 @@ type recorded struct {
 	Path   string
 	Header http.Header
 	Body   []byte
+	Query  string
 }
 
 type fakeLink struct {
@@ -75,6 +76,8 @@ type backend struct {
 	// throttlePair makes POST pair answer 429 with Retry-After.
 	throttlePair bool
 	pairCalls    int
+	// monitor, when set, is the monitor block of every sync answer (0.3).
+	monitor string
 	// extra answers routes the base fake does not know (sends, events).
 	// It runs with b.mu held, after the signature check.
 	extra func(w http.ResponseWriter, r *http.Request, body []byte, link *fakeLink) bool
@@ -96,7 +99,7 @@ func (b *backend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.reqs = append(b.reqs, recorded{r.Method, r.URL.Path, r.Header.Clone(), body})
+	b.reqs = append(b.reqs, recorded{r.Method, r.URL.Path, r.Header.Clone(), body, r.URL.RawQuery})
 	if r.URL.Path == "/api/link/v1/pair" {
 		b.pairCalls++
 		if b.throttlePair {
@@ -199,7 +202,11 @@ func (b *backend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				b.t.Errorf("sync body: %v", err)
 			}
 			b.syncs = append(b.syncs, sr)
-			_, _ = w.Write([]byte(`{"next_sync_s":5,"paused":false,"status":"active","site":{"id":4,"name":"Gilbert"},"company":{"name":"Spoken Parts"},"sends":[],"cancel":[],"commands":[]}`))
+			mon := ""
+			if b.monitor != "" {
+				mon = `,"monitor":` + b.monitor
+			}
+			_, _ = w.Write([]byte(`{"next_sync_s":5,"paused":false,"status":"active","site":{"id":4,"name":"Gilbert"},"company":{"name":"Spoken Parts"},"sends":[],"cancel":[],"commands":[]` + mon + `}`))
 		}
 	default:
 		if b.extra != nil && link != nil && b.extra(w, r, body, link) {
@@ -535,8 +542,8 @@ func assertNoLeak(t *testing.T, dir string, be *backend, logs *lockedBuf, secret
 					}
 				}
 			}
-			if strings.Contains(r.Path, s) {
-				t.Errorf("%q in path", s)
+			if strings.Contains(r.Path, s) || strings.Contains(strings.ToLower(r.Query), lower) {
+				t.Errorf("%q in path or query", s)
 			}
 		}
 		if strings.Contains(logs.String(), s) {

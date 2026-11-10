@@ -205,6 +205,16 @@ type SyncPrinter struct {
 	TotalLayers *int         `json:"total_layers,omitempty"`
 	TrayNow     *int         `json:"tray_now,omitempty"`
 	CanStart    string       `json:"can_start,omitempty"`
+
+	// 0.3: camera and alert status for the farm page.
+	Monitor *SyncMonitor `json:"monitor,omitempty"`
+}
+
+// SyncMonitor is one printer's monitoring status in a sync request.
+type SyncMonitor struct {
+	Camera      string `json:"camera"` // none, off, waiting, ok, failing, stream_off
+	LastFrameAt string `json:"last_frame_at,omitempty"`
+	OpenAlerts  int    `json:"open_alerts"`
 }
 
 // SyncTray is one AMS slot in a sync request.
@@ -225,9 +235,10 @@ type SyncNozzle struct {
 
 // SyncRequest is the body of POST sync.
 type SyncRequest struct {
-	Version  string        `json:"version"`
-	UptimeS  int64         `json:"uptime_s"`
-	Printers []SyncPrinter `json:"printers"`
+	Version        string        `json:"version"`
+	UptimeS        int64         `json:"uptime_s"`
+	Printers       []SyncPrinter `json:"printers"`
+	MonitorVersion int           `json:"monitor_version,omitempty"`
 }
 
 // SyncResponse is the answer of POST sync.
@@ -243,6 +254,8 @@ type SyncResponse struct {
 	// 0.2: sends waiting for this link, and how each printer may start.
 	SendsWaiting int               `json:"sends_waiting"`
 	CanStart     map[string]string `json:"can_start"`
+	// 0.3: the site's monitoring settings (nil from older backends).
+	Monitor json.RawMessage `json:"monitor"`
 }
 
 // MapRow is one filament of a send's plan: the AMS slot it prints from.
@@ -360,6 +373,116 @@ func (c *Client) Events(ctx context.Context, key ed25519.PrivateKey, linkID, ser
 	return c.do(ctx, key, linkID, http.MethodPost, "printers/"+serial+"/events", map[string]any{"events": events}, nil)
 }
 
+// MaxFrame is the largest camera frame Spoken Parts takes (400 KB).
+const MaxFrame = 400 << 10
+
+// FrameMeta describes one camera frame. It goes in the query string, so the
+// signature covers it.
+type FrameMeta struct {
+	ID          string // uuid made by the link (the same id twice is stored once)
+	TakenAt     time.Time
+	Reason      string // interval, alert, finish, failed
+	Printing    bool
+	TaskID      string
+	Layer       *int
+	TotalLayers *int
+	AlertKey    string
+}
+
+// FrameAnswer is the answer of POST printers/<serial>/frames.
+type FrameAnswer struct {
+	FrameID   string `json:"frame_id"`
+	Duplicate bool   `json:"duplicate"`
+	// ImageURL is a signed link to the frame (24 hours), for alert frames
+	// only. It goes to the Home Assistant phone notification, never to logs.
+	ImageURL string `json:"image_url"`
+}
+
+// CodeCameraOff means Spoken Parts does not want frames from this printer.
+const CodeCameraOff = "camera_off"
+
+var (
+	reasonRe = regexp.MustCompile(`^(interval|alert|finish|failed)$`)
+	taskIDRe = regexp.MustCompile(`^[0-9]{1,20}$`)
+	keyRe    = regexp.MustCompile(`^[A-Za-z0-9_:.\-]{1,120}$`)
+)
+
+// Frame calls POST printers/<serial>/frames with one JPEG.
+func (c *Client) Frame(ctx context.Context, key ed25519.PrivateKey, linkID, serial string, m FrameMeta, jpeg []byte) (*FrameAnswer, error) {
+	if !serialRe.MatchString(serial) || !sendIDRe.MatchString(m.ID) || !reasonRe.MatchString(m.Reason) {
+		return nil, errors.New("bad frame call")
+	}
+	if len(jpeg) < 4 || len(jpeg) > MaxFrame || jpeg[0] != 0xFF || jpeg[1] != 0xD8 {
+		return nil, errors.New("frame is not a JPEG of at most 400 KB")
+	}
+	q := url.Values{}
+	q.Set("id", m.ID)
+	q.Set("ts", strconv.FormatInt(m.TakenAt.Unix(), 10))
+	q.Set("reason", m.Reason)
+	q.Set("printing", map[bool]string{false: "0", true: "1"}[m.Printing])
+	if taskIDRe.MatchString(m.TaskID) {
+		q.Set("task_id", m.TaskID)
+	}
+	if m.Layer != nil {
+		q.Set("layer", strconv.Itoa(*m.Layer))
+	}
+	if m.TotalLayers != nil {
+		q.Set("total_layers", strconv.Itoa(*m.TotalLayers))
+	}
+	if m.AlertKey != "" && keyRe.MatchString(m.AlertKey) {
+		q.Set("alert_key", m.AlertKey)
+	}
+	var out FrameAnswer
+	if err := c.doRaw(ctx, key, linkID, "printers/"+serial+"/frames?"+q.Encode(), "image/jpeg", jpeg, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// Job is the print an alert is about.
+type Job struct {
+	Task         string `json:"task"`
+	TaskID       string `json:"task_id"`
+	GcodeState   string `json:"gcode_state"`
+	Layer        *int   `json:"layer"`
+	TotalLayers  *int   `json:"total_layers"`
+	Percent      *int   `json:"percent"`
+	RemainingMin *int   `json:"remaining_min"`
+}
+
+// Alert is one alert the link raised.
+type Alert struct {
+	ID       string         `json:"id"`
+	TS       string         `json:"ts"`
+	Severity string         `json:"severity"`
+	Key      string         `json:"key"`
+	Message  string         `json:"message"`
+	Data     map[string]any `json:"data"`
+	FrameID  *string        `json:"frame_id"`
+	Job      Job            `json:"job"`
+}
+
+// AlertBatch is the body of POST printers/<serial>/alerts.
+type AlertBatch struct {
+	Alerts  []Alert  `json:"alerts"`
+	Cleared []string `json:"cleared"`
+	Reset   bool     `json:"reset"`
+}
+
+// Alerts calls POST printers/<serial>/alerts (at most 50 alerts per call).
+func (c *Client) Alerts(ctx context.Context, key ed25519.PrivateKey, linkID, serial string, b AlertBatch) error {
+	if !serialRe.MatchString(serial) || len(b.Alerts) > 50 || (len(b.Alerts) == 0 && len(b.Cleared) == 0 && !b.Reset) {
+		return errors.New("bad alerts call")
+	}
+	if b.Alerts == nil {
+		b.Alerts = []Alert{}
+	}
+	if b.Cleared == nil {
+		b.Cleared = []string{}
+	}
+	return c.do(ctx, key, linkID, http.MethodPost, "printers/"+serial+"/alerts", b, nil)
+}
+
 var (
 	sendIDRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 	serialRe = regexp.MustCompile(`^[A-Za-z0-9]{6,40}$`)
@@ -470,6 +593,15 @@ func (c *Client) do(ctx context.Context, key ed25519.PrivateKey, linkID, method,
 			return err
 		}
 	}
+	return c.send(ctx, key, linkID, method, path, "application/json", body, out)
+}
+
+// doRaw posts body as is with the given content type.
+func (c *Client) doRaw(ctx context.Context, key ed25519.PrivateKey, linkID, path, contentType string, body []byte, out any) error {
+	return c.send(ctx, key, linkID, http.MethodPost, path, contentType, body, out)
+}
+
+func (c *Client) send(ctx context.Context, key ed25519.PrivateKey, linkID, method, path, contentType string, body []byte, out any) error {
 	p, query, _ := strings.Cut(path, "?")
 	u := c.base.JoinPath(Prefix + p)
 	u.RawQuery = query
@@ -483,7 +615,7 @@ func (c *Client) do(ctx context.Context, key ed25519.PrivateKey, linkID, method,
 	}
 	req.Header.Set("Accept", "application/json")
 	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Content-Type", contentType)
 	}
 	c.sign(req, key, linkID, body)
 

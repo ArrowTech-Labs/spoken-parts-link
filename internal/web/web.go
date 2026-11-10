@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/logx"
+	"github.com/ArrowTech-Labs/spoken-parts-link/internal/monitor"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/printers"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/redact"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/sends"
@@ -57,6 +58,13 @@ type View struct {
 	// 0.2: the active send per printer serial, and whether auto start is on.
 	Sends     map[string]sends.Status
 	AutoStart bool
+	// 0.3: monitoring (on or off in Spoken Parts), each printer's camera and
+	// alerts, and the Home Assistant phone alerts.
+	MonitorOn bool
+	Monitor   map[string]monitor.Status
+	HAReady   bool // the encrypted settings are open
+	HASet     bool
+	HAMin     string
 }
 
 // Controller is the app behind the page.
@@ -68,6 +76,10 @@ type Controller interface {
 	Trust(serial, fingerprint string) error
 	RemovePrinter(serial string) error
 	Unpair() error
+	SaveHA(webhookID, minSeverity string) error
+	SetHAMin(minSeverity string) error
+	RemoveHA() error
+	TestHA(ctx context.Context) error
 }
 
 // Options for the server.
@@ -106,7 +118,7 @@ p{margin:.4rem 0}.mut{color:var(--mut)}.ok{color:var(--ok)}.warn{color:var(--war
 .card{border:1px solid var(--line);border-radius:8px;padding:.8rem;margin:.8rem 0}
 dl{display:grid;grid-template-columns:max-content 1fr;gap:.2rem .8rem;margin:.6rem 0}dt{color:var(--mut)}dd{margin:0;overflow-wrap:anywhere}
 form{margin:.6rem 0}label{display:block;font-weight:600;margin:.4rem 0 .2rem}
-input[type=text],input[type=password]{font:inherit;width:100%;max-width:18rem;padding:.5rem;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)}
+input[type=text],input[type=password],select{font:inherit;width:100%;max-width:18rem;padding:.5rem;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)}
 button,.btn{font:inherit;display:inline-block;margin:.4rem .4rem 0 0;padding:.5rem 1rem;border-radius:6px;border:1px solid var(--acc);background:var(--acc);color:#fff;text-decoration:none;cursor:pointer}
 .btn2{background:transparent;color:var(--acc)}.danger{border-color:#b3261e;background:#b3261e}
 code{font-size:.85em;overflow-wrap:anywhere}footer{margin:2rem 0 1rem;color:var(--mut);font-size:.9rem}`
@@ -141,6 +153,19 @@ func New(ctrl Controller, opts Options) (*Server, error) {
 		"pct":        func(p *int) int { return *p },
 		"canStart":   canStartText,
 		"storage":    storageText,
+		"camText":    camText,
+		"levelText": func(l string) string {
+			switch l {
+			case "critical":
+				return "critical problems only"
+			case "info":
+				return "every alert, also finished prints"
+			}
+			return "warnings and critical problems"
+		},
+		"monFor": func(m map[string]monitor.Status, serial string) monitor.Status {
+			return m[serial]
+		},
 		"sendFor": func(m map[string]sends.Status, serial string) *sends.Status {
 			if st, ok := m[serial]; ok {
 				return &st
@@ -170,6 +195,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /trust", s.post(s.trust))
 	mux.HandleFunc("POST /printer/remove", s.post(s.removePrinter))
 	mux.HandleFunc("POST /remove", s.post(s.remove))
+	mux.HandleFunc("POST /ha", s.post(s.saveHA))
+	mux.HandleFunc("POST /ha/level", s.post(s.haLevel))
+	mux.HandleFunc("POST /ha/remove", s.post(s.removeHA))
+	mux.HandleFunc("POST /ha/test", s.post(s.testHA))
 	return s.guard(mux)
 }
 
@@ -341,6 +370,54 @@ func (s *Server) remove(r *http.Request) Msg {
 	return msgFor(s.ctrl.Unpair(), MsgRemovedLocal)
 }
 
+var (
+	webhookRe  = regexp.MustCompile(`^[A-Za-z0-9_-]{24,128}$`)
+	severityRe = regexp.MustCompile(`^(info|warning|critical)$`)
+)
+
+// webhookID accepts the id alone or the whole webhook URL Home Assistant
+// shows, and returns the id.
+func webhookID(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if i := strings.LastIndex(raw, "/api/webhook/"); i >= 0 {
+		raw = raw[i+len("/api/webhook/"):]
+	}
+	return strings.TrimRight(raw, "/")
+}
+
+func (s *Server) saveHA(r *http.Request) Msg {
+	raw := r.PostForm.Get("webhook")
+	id := webhookID(raw)
+	level := r.PostForm.Get("level")
+	if !severityRe.MatchString(level) {
+		level = "warning"
+	}
+	if !webhookRe.MatchString(id) {
+		return MsgHAFormat
+	}
+	s.red.Add(id)
+	s.red.AddTransient(strings.TrimSpace(raw))
+	return msgFor(s.ctrl.SaveHA(id, level), MsgHASaved)
+}
+
+func (s *Server) haLevel(r *http.Request) Msg {
+	level := r.PostForm.Get("level")
+	if !severityRe.MatchString(level) {
+		return MsgError
+	}
+	return msgFor(s.ctrl.SetHAMin(level), MsgHASaved)
+}
+
+func (s *Server) removeHA(r *http.Request) Msg {
+	return msgFor(s.ctrl.RemoveHA(), MsgHARemoved)
+}
+
+func (s *Server) testHA(r *http.Request) Msg {
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	return msgFor(s.ctrl.TestHA(ctx), MsgHATested)
+}
+
 func msgFor(err error, ok Msg) Msg {
 	if err == nil {
 		return ok
@@ -475,6 +552,27 @@ func canStartText(p printers.Snapshot, autoStart bool) string {
 		return "No, upload only. Someone taps the file on the printer screen (Cloud mode)."
 	default:
 		return "Not known yet"
+	}
+}
+
+func camText(st monitor.Status, on bool) string {
+	if !on {
+		return "Monitoring is off. Turn it on in Spoken Parts (the building's monitor settings)."
+	}
+	switch st.Camera {
+	case monitor.CamOK:
+		return "On"
+	case monitor.CamWaiting:
+		return "On. The first frame comes when a print is running."
+	case monitor.CamFailing:
+		if st.CamReason != "" {
+			return "Not working: " + st.CamReason + ". We keep trying."
+		}
+		return "Not working. We keep trying."
+	case monitor.CamStreamOff:
+		return "The printer's camera stream is off. Turn on LAN Only Liveview on the printer (Settings, LAN Only). Cloud mode stays on."
+	default:
+		return "Off for this printer. Turn it on in Spoken Parts (the printer's monitor settings)."
 	}
 }
 

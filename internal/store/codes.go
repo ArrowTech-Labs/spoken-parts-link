@@ -40,6 +40,15 @@ var (
 // salt = "spoken-parts-link", info = "access-codes-v1"), 32 bytes.
 // The result must only ever live in memory.
 func DeriveKey(localSecret, dataKey []byte) ([]byte, error) {
+	return DeriveKeyFor(localSecret, dataKey, KDFInfo)
+}
+
+// HAInfo is the HKDF info for the Home Assistant settings file (the webhook
+// id), so it has its own key.
+const HAInfo = "ha-webhook-v1"
+
+// DeriveKeyFor is DeriveKey with another info string.
+func DeriveKeyFor(localSecret, dataKey []byte, info string) ([]byte, error) {
 	if len(localSecret) != 32 || len(dataKey) != 32 {
 		return nil, ErrBadKey
 	}
@@ -47,7 +56,7 @@ func DeriveKey(localSecret, dataKey []byte) ([]byte, error) {
 	ikm = append(ikm, localSecret...)
 	ikm = append(ikm, dataKey...)
 	defer clear(ikm)
-	return hkdf.Key(sha256.New, ikm, []byte(KDFSalt), KDFInfo, KeyLen)
+	return hkdf.Key(sha256.New, ikm, []byte(KDFSalt), info, KeyLen)
 }
 
 // Codes is the encrypted map of printer serial to access code.

@@ -53,6 +53,10 @@
 <dt>Storage</dt><dd>{{storage .Storage}}</dd>
 <dt>Can start prints</dt><dd>{{canStart . $.AutoStart}}</dd>
 {{if and .Layer .TotalLayers}}<dt>Layer</dt><dd>{{pct .Layer}} of {{pct .TotalLayers}}</dd>{{end}}
+{{if eq $.Phase "active"}}{{$m := monFor $.Monitor .Serial}}
+<dt>Camera</dt><dd>{{camText $m $.MonitorOn}}{{if not $m.LastFrameAt.IsZero}} Last frame {{ago $m.LastFrameAt}}.{{end}}</dd>
+{{if $.MonitorOn}}<dt>Open alerts</dt><dd>{{$m.OpenAlerts}}{{if $m.Waiting}}. {{$m.Waiting}} waiting to go to Spoken Parts.{{end}}</dd>{{end}}
+{{end}}
 </dl>
 {{with sendFor $.Sends .Serial}}
 {{if .FileName}}<p class="note">Print from Spoken Parts: <code>{{.FileName}}</code>. {{.Text}}</p>{{end}}
@@ -89,6 +93,42 @@
 {{end}}
 </section>
 
+{{if eq .Phase "active"}}
+<section aria-labelledby="ha-h">
+<h2 id="ha-h">Phone alerts through Home Assistant</h2>
+<p>Optional. When monitoring sees a problem on a printer, the link can also tell your phone through one Home Assistant automation. This works even when the internet is down. The link gets no other access to Home Assistant.</p>
+{{if not .HAReady}}<p class="mut">Waiting for Spoken Parts. Then you can set this up.</p>
+{{else if .HASet}}
+<p class="ok">On. Your phone gets {{levelText .HAMin}}.</p>
+<form method="post" action="{{.Base}}/ha/level">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<label for="ha-level">Send to the phone</label>
+<select id="ha-level" name="level">{{template "levels" .HAMin}}</select>
+<button type="submit">Save</button>
+</form>
+<form method="post" action="{{.Base}}/ha/test">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<button type="submit" class="btn2">Send a test</button>
+</form>
+<form method="post" action="{{.Base}}/ha/remove">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<button type="submit" class="btn2">Turn off phone alerts</button>
+</form>
+{{else}}
+<p>In Home Assistant, add an automation with a Webhook trigger. Turn on "Only accessible from the local network" and use a long random webhook ID. As the action, notify your phone with the message the link sends. The Documentation tab of this app has the full example.</p>
+<form method="post" action="{{.Base}}/ha" autocomplete="off">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<label for="ha-id">Webhook ID</label>
+<input type="password" id="ha-id" name="webhook" required minlength="24" maxlength="200" autocomplete="off" spellcheck="false" aria-describedby="ha-hint">
+<p class="mut" id="ha-hint">It stays here, saved encrypted like the access codes, and is never shown again or sent to Spoken Parts.</p>
+<label for="ha-level-new">Send to the phone</label>
+<select id="ha-level-new" name="level">{{template "levels" "warning"}}</select>
+<div><button type="submit">Save</button></div>
+</form>
+{{end}}
+</section>
+{{end}}
+
 {{if ne .Phase "unpaired"}}
 <section aria-labelledby="remove-h">
 <h2 id="remove-h">Remove</h2>
@@ -96,3 +136,7 @@
 </section>
 {{end}}
 {{template "foot" .}}
+
+{{define "levels"}}<option value="critical"{{if eq . "critical"}} selected{{end}}>Critical problems only</option>
+<option value="warning"{{if eq . "warning"}} selected{{end}}>Warnings and critical problems</option>
+<option value="info"{{if eq . "info"}} selected{{end}}>Everything, also finished prints</option>{{end}}

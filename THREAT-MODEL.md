@@ -1,7 +1,8 @@
 # Threat model: Spoken Parts Link
 
-This covers the link program in this repository (version 0.2: status, and
-uploading the prints Spoken Parts sends), its
+This covers the link program in this repository (version 0.3: status,
+uploading the prints Spoken Parts sends, and watching printers with camera
+stills), its
 pairing with Spoken Parts, the data it keeps on the device, and how release
 images are built. It is written for customers, auditors and contributors.
 
@@ -155,14 +156,26 @@ on the printer: the link deletes only files it uploaded itself.
 | Deleting someone's files | The link deletes only reserved `SP-<id>-<plate>.gcode.3mf` names that are in its own manifest (`/data/state/storage.json`) with the recorded size, and never the running print's file. Anything else on the stick is never touched. |
 | Printer busy or in trouble | The link uploads only to a printer that is not printing, has storage and reports no serious error. |
 
-### 4.9 Supply chain (B4)
+### 4.9 Monitoring and camera stills (B1, B2, B3)
+
+| Threat | Mitigation |
+|---|---|
+| Access code leaks through the camera tool | The link does the RTSPS session itself (TLS 1.2, the same Bambu CA and serial check as MQTT, Digest or Basic login in process). ffmpeg gets only one H.264 key frame on stdin and writes the JPEG to stdout. Its argument list is fixed, its environment is empty, and it never sees a URL or the code. Tests check the argv and env. |
+| A fake camera on the LAN | The camera connection must pass the certificate check before the code is sent, and is only used while the checked MQTT session to the same address is up. |
+| Malicious camera data | The RTSP client caps header, body, packet, NAL and frame sizes and the whole grab has a 15 second limit; ffmpeg has its own 15 second limit and its output is capped at 2 MB. The depacketizer is fuzz tested. ffmpeg runs under the app's AppArmor profile (`ix`), which allows no other program and no shell is in the image. |
+| Privacy (people in the room) | Stills only while printing, with problems and at the end; none while idle. Monitoring and the camera are off until an owner turns them on in Spoken Parts. Metadata (EXIF and comments) is stripped. |
+| Phone alert webhook | The webhook id is a secret: stored in its own AES-256-GCM file, keyed like the access codes, registered with the log redactor, never shown again or sent to Spoken Parts. The link posts only to Home Assistant on this host, never through a proxy. The app has no `homeassistant_api` or `hassio_api` permission. |
+| Alerts that act on printers | None. The monitor never sends a printer command; the MQTT allow list is unchanged (pushall, and project_file behind the off flag). |
+| Signed still links | Stills attached to alerts can come with a 24 hour signed link for the phone notification. The link registers it with the log redactor. |
+
+### 4.10 Supply chain (B4)
 
 | Threat | Mitigation |
 |---|---|
 | Malicious change to the code | Code owners review, protected main branch, no `pull_request_target` workflows, read only default token. |
 | Compromised GitHub Action | Every action pinned to a full commit SHA. Dependabot proposes updates. |
 | Tampered image | Release images are signed with keyless cosign and carry build provenance and SBOM attestations from the release workflow on a version tag. The release job runs in a protected environment that needs a maintainer's approval. |
-| Dependencies | No third party Go modules. The builder image is pinned by digest. `govulncheck` runs in CI. Builds are reproducible (`-trimpath`, no build ID), and CI checks two builds match byte for byte. |
+| Dependencies | No third party Go modules. The builder image and the Alpine image ffmpeg comes from are pinned by digest, and the ffmpeg package by version (installed with `--no-scripts`; only its binary and libraries are copied into the image). `govulncheck` runs in CI. Builds are reproducible (`-trimpath`, no build ID), and CI checks two builds match byte for byte. |
 
 ## 5. Risks that remain
 
@@ -184,5 +197,9 @@ on the printer: the link deletes only files it uploaded itself.
    link reports a wrong file or wrong slot, but cannot stop the print.
 8. **Files on the USB stick.** Anyone at the printer can read the uploaded file
    until the print ends and the link deletes it.
-9. **Host compromise.** An app with full access, or a compromise of the Home
+9. **ffmpeg parses camera data.** A bug in ffmpeg's H.264 decoder could be
+   reached by a malicious camera stream that passed the certificate check (in
+   practice, a compromised printer). It runs unprivileged under AppArmor with
+   no network use of its own, but it can read the app's data folder.
+10. **Host compromise.** An app with full access, or a compromise of the Home
    Assistant host, can read everything on that host, including this app's data.

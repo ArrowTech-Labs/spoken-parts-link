@@ -110,7 +110,7 @@ func TestConfigYAML(t *testing.T) {
 	m := topLevel(s)
 	want := map[string]string{
 		"name":           `"Spoken Parts Link"`,
-		"version":        `"0.2.2"`,
+		"version":        `"0.3.0"`,
 		"slug":           "spoken_parts_link",
 		"url":            `"https://github.com/ArrowTech-Labs/spoken-parts-link"`,
 		"image":          `"ghcr.io/arrowtech-labs/spoken-parts-link"`,
@@ -185,12 +185,31 @@ func TestAppArmorProfile(t *testing.T) {
 	if strings.Contains(s, "\n  file,") {
 		t.Error("apparmor.txt must not allow all files")
 	}
+	// 0.3: exactly one other program may run, ffmpeg, under this profile.
+	execs := regexp.MustCompile(`(?m)^\s*(\S+)\s+[a-z]*[iupPcC]x[a-z]*,`).FindAllStringSubmatch(s, -1)
+	if len(execs) != 1 || execs[0][1] != "/usr/bin/ffmpeg" || !strings.Contains(s, "/usr/bin/ffmpeg ix,") {
+		t.Errorf("exec rules must be exactly /usr/bin/ffmpeg ix, got %v", execs)
+	}
+	for _, bad := range []string{"/bin/sh", "/bin/busybox", "ux,", "Ux,", "px,", "Px,"} {
+		if strings.Contains(s, bad) {
+			t.Errorf("apparmor.txt has %q", bad)
+		}
+	}
 }
 
 func TestDockerfile(t *testing.T) {
 	s := read(t, "spoken_parts_link/Dockerfile")
 	if !regexp.MustCompile(`ARG GO_IMAGE=golang:1\.27-alpine@sha256:[0-9a-f]{64}\n`).MatchString(s) {
 		t.Error("builder image must be pinned by digest")
+	}
+	if !regexp.MustCompile(`ARG ALPINE_IMAGE=alpine:3\.\d+@sha256:[0-9a-f]{64}\n`).MatchString(s) || !regexp.MustCompile(`ARG FFMPEG_VERSION=\d[^\s]*-r\d+\n`).MatchString(s) {
+		t.Error("the ffmpeg image and package must be pinned")
+	}
+	// No shell or package manager in the image: only ffmpeg's files are copied.
+	for _, bad := range []string{"COPY --from=ffmpeg /rootfs/bin", "COPY --from=ffmpeg /rootfs/ /", "COPY --from=ffmpeg /rootfs/sbin"} {
+		if strings.Contains(s, bad) {
+			t.Errorf("Dockerfile copies %q", bad)
+		}
 	}
 	for _, want := range []string{
 		"CGO_ENABLED=0", "-trimpath", `-ldflags "-s -w -buildid= -X main.version=${VERSION}"`,
@@ -199,6 +218,7 @@ func TestDockerfile(t *testing.T) {
 		`org.opencontainers.image.source="https://github.com/ArrowTech-Labs/spoken-parts-link"`,
 		`org.opencontainers.image.licenses="PolyForm-Shield-1.0.0"`,
 		"FROM scratch", "/etc/ssl/certs/ca-certificates.crt",
+		"COPY --from=ffmpeg /rootfs/usr/bin/ffmpeg /usr/bin/ffmpeg", "--no-scripts", `"ffmpeg=${FFMPEG_VERSION}"`,
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("Dockerfile lacks %q", want)

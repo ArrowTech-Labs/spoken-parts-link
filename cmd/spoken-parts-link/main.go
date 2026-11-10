@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/app"
+	"github.com/ArrowTech-Labs/spoken-parts-link/internal/camera"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/config"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/logx"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/printers"
@@ -87,6 +88,9 @@ func run() error {
 		Bundle:  bundle,
 		// Off unless SP_LINK_AUTOSTART=true (Developer Mode printers only).
 		AutoStart: cfg.AutoStart,
+		// 0.3: camera stills. The link does the RTSPS session itself and
+		// hands ffmpeg only the H.264 key frame on stdin: no URL, no code.
+		Grabber: &camera.Grabber{FFmpeg: camera.DefaultFFmpeg},
 	})
 	if err != nil {
 		return err

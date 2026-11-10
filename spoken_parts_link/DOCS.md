@@ -15,6 +15,12 @@ Raspberry Pi.
   while a print is on its way).
 - It uploads the prints Spoken Parts sends to the printer's USB stick, and
   follows each print to the end (see "Sending prints" below).
+- From version 0.3 it watches each printer for problems, when you turn
+  monitoring on in Spoken Parts: failed or paused prints, printer messages
+  (HMS), objects skipped in a short time, no progress, temperatures off
+  target, lost contact. With the camera on, it takes a camera still every 2
+  minutes while a print runs, and one with each problem (see "Watching for
+  problems" below).
 
 ## What it does not do
 
@@ -27,7 +33,11 @@ Raspberry Pi.
   device, and only go to the printer they belong to.
 - It sends only two kinds of message to a printer: a request for its full
   status (called "pushall"), at most once every 5 minutes, and the file upload
-  (FTPS, port 990).
+  (FTPS, port 990). Camera stills are read from the printer's own camera
+  stream (RTSPS, port 322); nothing is sent to the printer for them.
+- It never pauses, stops or skips anything when it sees a problem. It tells
+  people. Stopping a print stays with a person at the printer screen, in Bambu
+  Handy or in Bambu Studio.
 - It opens no port to the internet. It only makes outgoing HTTPS connections to
   spokenparts.com.
 
@@ -159,6 +169,89 @@ last delivery problem.
 Files wait in the app's private data folder while they are delivered. They are
 deleted after the print, after a failure, or when the link is removed.
 
+## Watching for problems
+
+Monitoring is off until an owner turns it on in Spoken Parts (the building's
+monitor settings). The rules run here on the link, so they keep working when
+the internet is down; alerts wait and go to Spoken Parts when it is back.
+
+What raises an alert:
+
+| What | How serious |
+|---|---|
+| A print failed | Critical |
+| A print paused | Warning, critical with an error or printer message |
+| A print finished (the plate needs clearing) | Info |
+| A new printer message (HMS) | Warning. Critical for fatal ones and for any message from the AI camera (codes starting 0C00) |
+| A printer error | Critical |
+| The printer's own AI camera saw a problem | Critical |
+| Objects skipped during a print | Warning. Critical when 2 or more are skipped within 10 minutes |
+| No progress for 20 minutes | Critical |
+| Progress or time left jumps | Warning |
+| A nozzle or the bed is off target for 4 checks in a row | Critical |
+| The link lost contact with the printer for 4 checks | Critical during a print, else warning |
+| The camera failed 3 times in a row | Warning |
+
+The same alert is not sent again for 30 minutes unless it gets more serious.
+The numbers are settings in Spoken Parts. The link checks every 30 seconds.
+
+### Camera stills
+
+Turn the camera on per printer in Spoken Parts. The printer must have "LAN
+Only Liveview" on (on the printer: Settings, LAN Only, LAN Only Liveview).
+This does not turn on LAN Only mode: your printer stays in Cloud mode, and
+Developer Mode stays off.
+
+- Stills are taken only while a print runs (every 2 minutes by default), and
+  one with each problem and at the end of a print. None while a printer is
+  idle. Cameras can see people in the room.
+- The link opens the camera stream itself, with the same certificate check as
+  for the printer status, and logs in with the access code. It takes one
+  picture and gives only that picture to ffmpeg (a video tool in this app) to
+  turn it into a JPEG. ffmpeg never sees the access code or the camera address.
+- The last 60 stills per printer are kept here in `/data/frames`. Each still
+  also goes to Spoken Parts, where your team sees it on the farm page. Spoken
+  Parts keeps stills for a limited time (set in Spoken Parts).
+
+## Phone alerts through Home Assistant
+
+Optional. The link can also send problems to your phone through one Home
+Assistant automation. This works when the internet is down. The app gets no
+other access to Home Assistant: it can only trigger this one automation.
+
+1. In Home Assistant, go to Settings, Automations, and create an automation.
+2. Add a trigger: Webhook. Pick a long random webhook ID (at least 24
+   characters) and keep "Only accessible from the local network" on.
+3. Add an action that notifies your phone. In YAML it looks like this (use the
+   name of your phone's notify service):
+
+```yaml
+alias: Spoken Parts printer alerts
+triggers:
+  - trigger: webhook
+    webhook_id: "PUT-YOUR-LONG-RANDOM-ID-HERE"
+    allowed_methods: [POST]
+    local_only: true
+actions:
+  - action: notify.mobile_app_your_phone
+    data:
+      title: "{{ trigger.json.title }}"
+      message: "{{ trigger.json.message }}"
+      data:
+        image: "{{ trigger.json.image_url | default('') }}"
+mode: queued
+```
+
+4. On the link page, under "Phone alerts through Home Assistant", paste the
+   webhook ID (or the whole webhook address) and choose what goes to the
+   phone: critical problems only, warnings and critical problems (the
+   default), or everything.
+5. Tap "Send a test".
+
+The webhook ID is kept encrypted, like the access codes, and is never shown
+again or sent to Spoken Parts. The picture in the notification is a link to
+the still in Spoken Parts that works for 24 hours.
+
 ## Why the app uses the host network
 
 Bambu Lab printers announce themselves with a broadcast on UDP port 2021. An
@@ -179,6 +272,10 @@ a backup.
   The link key is how Spoken Parts knows this is your link. Encrypting them
   would not help, because the key to open them would have to sit in the same
   folder and in the same backups.
+- **The Home Assistant webhook ID: encrypted,** the same way as the access
+  codes, in its own file.
+- **Monitor state and camera stills: not encrypted.** What each printer last
+  reported, which alerts were sent, and the last 60 stills per printer.
 
 ## Backups
 
