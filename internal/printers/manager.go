@@ -12,6 +12,7 @@ package printers
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"net"
 	"net/netip"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/api"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/logx"
+	"github.com/ArrowTech-Labs/spoken-parts-link/internal/monitor"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/mqtt"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/ssdp"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/store"
@@ -64,6 +66,7 @@ type Config struct {
 	OnlineWindow time.Duration                                                     // 90 s
 	MaxPrinters  int                                                               // 200
 	FTPSPort     int                                                               // 990
+	CameraPort   int                                                               // 322 (RTSPS)
 	// AutoStart allows a project_file start (Developer Mode printers only).
 	// Off by default (SP_LINK_AUTOSTART); our printers stay in Cloud mode.
 	AutoStart bool
@@ -114,6 +117,9 @@ type printer struct {
 	lastPushAll time.Time
 	live        live
 	client      *mqtt.Client // the open MQTT session, while connected
+	// merged is the print object of every report so far, field by field
+	// (0.3 monitoring rules read it).
+	merged map[string]json.RawMessage
 
 	gen    uint64
 	cancel context.CancelFunc
@@ -214,6 +220,9 @@ func New(ctx context.Context, cfg Config) (*Manager, error) {
 	}
 	if cfg.FTPSPort == 0 {
 		cfg.FTPSPort = 990
+	}
+	if cfg.CameraPort == 0 {
+		cfg.CameraPort = 322
 	}
 	if cfg.Dial == nil {
 		d := &net.Dialer{Timeout: 10 * time.Second}
@@ -860,6 +869,7 @@ func (m *Manager) applyReport(serial string, gen uint64, payload []byte) {
 	lu, _ := parseLive(payload)
 	m.with(serial, gen, func(p *printer) {
 		p.live.apply(lu)
+		p.merged, _ = monitor.Merge(p.merged, payload)
 		p.lastReport = m.cfg.Now()
 		if u.gcodeState != nil {
 			p.gcodeState = *u.gcodeState
