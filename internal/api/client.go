@@ -303,6 +303,8 @@ type StateRequest struct {
 	SHA256      string     `json:"sha256,omitempty"`
 	SubtaskName string     `json:"subtask_name,omitempty"`
 	Alert       *SendAlert `json:"alert,omitempty"`
+	// Others: earlier Spoken Parts files still on the printer's storage.
+	Others []string `json:"others,omitempty"`
 }
 
 // SendAlert is a problem after the start that a person must act on.

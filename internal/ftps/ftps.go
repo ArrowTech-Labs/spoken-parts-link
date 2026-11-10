@@ -260,6 +260,79 @@ func copyWithProgress(w io.Writer, r io.Reader, size int64, progress func(int64)
 	return sent, nil
 }
 
+// Entry is one file in a directory listing.
+type Entry struct {
+	Name string
+	Size int64
+	Dir  bool
+}
+
+// List returns the files in the server's current directory (the printer's
+// USB stick root). It reads vsftpd's LIST format:
+// "-rwxr-xr-x    1 103      107       2834512 Nov 10 02:41 name".
+func (c *Client) List(ctx context.Context) ([]Entry, error) {
+	raw, err := c.passive(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer raw.Close()
+	if err := c.cmd("LIST"); err != nil {
+		return nil, err
+	}
+	if _, err := c.expect(150, 125); err != nil {
+		return nil, err
+	}
+	dc := tls.Client(raw, c.cfg)
+	hctx, cancel := context.WithTimeout(ctx, c.timeout)
+	err = dc.HandshakeContext(hctx)
+	cancel()
+	if err != nil {
+		return nil, fmt.Errorf("ftps: data connection: %w", err)
+	}
+	_ = raw.SetReadDeadline(time.Now().Add(c.timeout))
+	data, err := io.ReadAll(io.LimitReader(dc, 1<<20))
+	_ = dc.Close()
+	if err != nil && len(data) == 0 {
+		return nil, fmt.Errorf("ftps: reading the list: %w", err)
+	}
+	if _, err := c.expect(226); err != nil {
+		return nil, err
+	}
+	var out []Entry
+	for _, line := range strings.Split(string(data), "\n") {
+		if e, ok := parseListLine(strings.TrimRight(line, "\r")); ok {
+			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
+func parseListLine(line string) (Entry, bool) {
+	f := strings.Fields(line)
+	if len(f) < 9 || len(f[0]) < 1 {
+		return Entry{}, false
+	}
+	size, err := strconv.ParseInt(f[4], 10, 64)
+	if err != nil {
+		return Entry{}, false
+	}
+	// The name is everything after the 8th field (names may hold spaces).
+	rest := line
+	for i := 0; i < 8; i++ {
+		rest = strings.TrimLeft(rest, " ")
+		j := strings.IndexByte(rest, ' ')
+		if j < 0 {
+			return Entry{}, false
+		}
+		rest = rest[j:]
+	}
+	name := strings.TrimLeft(rest, " ")
+	if name == "" || name == "." || name == ".." {
+		return Entry{}, false
+	}
+	return Entry{Name: name, Size: size, Dir: f[0][0] == 'd'}, true
+}
+
 // Size returns the size of name on the server.
 func (c *Client) Size(name string) (int64, error) {
 	if !nameRe.MatchString(name) {

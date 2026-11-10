@@ -8,7 +8,7 @@ import (
 // An H2D style full report: two AMS 2 Pro (A feeds the left nozzle, B the
 // right), two nozzles, storage, a job with layers, an HMS and the mapping.
 const h2dReport = `{"print":{"command":"push_status","gcode_state":"RUNNING","layer_num":20,"total_layer_num":160,
-"subtask_name":"SP2-SP1052-1-A1B2","gcode_file":"/data/Metadata/plate_1.gcode","print_error":0,"sdcard":true,
+"subtask_name":"SP-0a1b2c3d-SP1052-P1","gcode_file":"/data/Metadata/plate_1.gcode","print_error":0,"sdcard":true,
 "hms":[{"attr":50331904,"code":65543},{"attr":50331904,"code":196615}],"mapping":[0,256],
 "ams":{"tray_now":"0","ams":[{"id":"0","info":"0103","tray":[{"id":"0","tray_type":"PLA","tray_color":"000000FF"},{"id":"1"},{"id":"2","tray_type":"PETG","tray_color":"FFFFFFFF"},{"id":"3","tray_type":""}]},
 {"id":"1","info":"0003","tray":[{"id":"0","tray_type":"PLA","tray_color":"0000FFFF"}]}]},
@@ -21,7 +21,7 @@ func TestParseLiveH2D(t *testing.T) {
 	}
 	var l live
 	l.apply(u)
-	if *l.layer != 20 || *l.total != 160 || l.subtask != "SP2-SP1052-1-A1B2" || l.gcodeFile != "/data/Metadata/plate_1.gcode" {
+	if *l.layer != 20 || *l.total != 160 || l.subtask != "SP-0a1b2c3d-SP1052-P1" || l.gcodeFile != "/data/Metadata/plate_1.gcode" {
 		t.Fatalf("job %+v", l)
 	}
 	if !reflect.DeepEqual(l.hms, []string{"HMS_0300_0100_0001_0007", "HMS_0300_0100_0003_0007"}) || !l.hmsFatal {

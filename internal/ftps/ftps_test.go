@@ -50,19 +50,19 @@ func TestUploadResumesTheSessionAndChecksTheSize(t *testing.T) {
 	}
 	data := bytes.Repeat([]byte("G1 X1 Y1\n"), 50000)
 	var last int64
-	if err := c.Store(context.Background(), "/SP2-ABC-1-A1B2.gcode.3mf", bytes.NewReader(data), int64(len(data)), func(n int64) { last = n }); err != nil {
+	if err := c.Store(context.Background(), "/SP-0a1b2c3d-ABC-P1.gcode.3mf", bytes.NewReader(data), int64(len(data)), func(n int64) { last = n }); err != nil {
 		t.Fatal(err)
 	}
 	if last != int64(len(data)) {
 		t.Fatalf("progress %d", last)
 	}
-	if got := s.Files()["SP2-ABC-1-A1B2.gcode.3mf"]; !bytes.Equal(got, data) {
+	if got := s.Files()["SP-0a1b2c3d-ABC-P1.gcode.3mf"]; !bytes.Equal(got, data) {
 		t.Fatalf("stored %d bytes", len(got))
 	}
 	if r := s.Resumed(); len(r) != 1 || !r[0] {
 		t.Fatalf("data connection resumed: %v", r)
 	}
-	if err := c.Delete("/SP2-ABC-1-A1B2.gcode.3mf"); err != nil {
+	if err := c.Delete("/SP-0a1b2c3d-ABC-P1.gcode.3mf"); err != nil {
 		t.Fatal(err)
 	}
 	if len(s.Files()) != 0 {
@@ -85,7 +85,7 @@ func TestNoStorageIs553(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Quit()
-	err = c.Store(context.Background(), "SP2-X-1-AAAA.gcode.3mf", strings.NewReader("abc"), 3, nil)
+	err = c.Store(context.Background(), "SP-0a1b2c3d-X-P1.gcode.3mf", strings.NewReader("abc"), 3, nil)
 	if Code(err) != 553 || !strings.Contains(err.Error(), "Could not create file") {
 		t.Fatalf("want 553, got %v", err)
 	}
@@ -100,7 +100,7 @@ func TestBenign426IsCheckedBySize(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Quit()
-	if err := c.Store(context.Background(), "SP2-X-1-AAAA.gcode.3mf", strings.NewReader("abcdef"), 6, nil); err != nil {
+	if err := c.Store(context.Background(), "SP-0a1b2c3d-X-P1.gcode.3mf", strings.NewReader("abcdef"), 6, nil); err != nil {
 		t.Fatalf("426 with a complete file: %v", err)
 	}
 }
@@ -132,7 +132,7 @@ func TestNoSessionReuseIsRefusedLikeVsftpd(t *testing.T) {
 	if err := c.Login("bblp", code); err != nil {
 		t.Fatal(err)
 	}
-	err = c.Store(context.Background(), "SP2-X-1-AAAA.gcode.3mf", strings.NewReader("abc"), 3, nil)
+	err = c.Store(context.Background(), "SP-0a1b2c3d-X-P1.gcode.3mf", strings.NewReader("abc"), 3, nil)
 	if Code(err) != 522 {
 		t.Fatalf("want 522, got %v", err)
 	}
@@ -153,5 +153,27 @@ func TestBadNamesAreRefusedBeforeSending(t *testing.T) {
 		if err := c.Delete(n); err == nil {
 			t.Errorf("delete %q accepted", n)
 		}
+	}
+}
+
+func TestListReadsVsftpdLines(t *testing.T) {
+	e, ok := parseListLine("-rwxr-xr-x    1 103      107       2834512 Nov 10 02:41 SP-0a1b2c3d-X2D-P1.gcode.3mf")
+	if !ok || e.Name != "SP-0a1b2c3d-X2D-P1.gcode.3mf" || e.Size != 2834512 || e.Dir {
+		t.Fatalf("%+v %v", e, ok)
+	}
+	if e, ok := parseListLine("drwxr-xr-x    2 103      107          4096 Nov 10 02:41 my prints"); !ok || !e.Dir || e.Name != "my prints" {
+		t.Fatalf("%+v", e)
+	}
+	ca := testutil.NewCA(t, "Test Printer CA")
+	s := testutil.NewFTPServer(t, ca.Leaf(t, serial), code)
+	s.Put("benchy.gcode.3mf", []byte("12345"))
+	c, err := login(t, s, code)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Quit()
+	list, err := c.List(context.Background())
+	if err != nil || len(list) != 1 || list[0].Name != "benchy.gcode.3mf" || list[0].Size != 5 {
+		t.Fatalf("%+v %v", list, err)
 	}
 }

@@ -36,19 +36,42 @@ func TestWrongSlot(t *testing.T) {
 }
 
 func TestMatches(t *testing.T) {
-	rec := &record{Subtask: "SP2-SP1052-1-A1B2"}
+	rec := &record{Subtask: "SP-0a1b2c3d-SP1052-P1"}
 	for _, s := range []printers.Snapshot{
-		{Subtask: "SP2-SP1052-1-A1B2"},
-		{Subtask: "sp2-sp1052-1-a1b2.gcode.3mf"},
-		{GcodeFile: "/media/usb0/SP2-SP1052-1-A1B2.gcode.3mf"},
+		{Subtask: "SP-0a1b2c3d-SP1052-P1"},
+		{Subtask: "sp-0a1b2c3d-sp1052-p1.gcode.3mf"},
+		{GcodeFile: "/media/usb0/SP-0a1b2c3d-SP1052-P1.gcode.3mf"},
 	} {
 		if !matches(rec, s) {
 			t.Errorf("%+v not matched", s)
 		}
 	}
-	for _, s := range []printers.Snapshot{{Subtask: "benchy"}, {Subtask: "SP2-SP1052-1-A1B3"}, {GcodeFile: "/data/Metadata/plate_1.gcode"}} {
+	for _, s := range []printers.Snapshot{{Subtask: "benchy"}, {Subtask: "SP-0a1b2c3e-SP1052-P1"}, {GcodeFile: "/data/Metadata/plate_1.gcode"}} {
 		if matches(rec, s) {
 			t.Errorf("%+v matched", s)
 		}
+	}
+}
+
+func TestRemovableNeverTheRunningPrintOrAForeignFile(t *testing.T) {
+	r := &Runner{files: map[string][]ManifestEntry{"S1": {{FileName: "SP-11111111-A-P1.gcode.3mf", Size: 10}}}}
+	idle := printers.Snapshot{GcodeState: "FINISH"}
+	if !r.removable("S1", idle)("SP-11111111-A-P1.gcode.3mf", 10) {
+		t.Fatal("our idle file not removable")
+	}
+	for _, c := range []struct {
+		name string
+		size int64
+	}{{"SP-11111111-A-P1.gcode.3mf", 11}, {"SP-22222222-A-P1.gcode.3mf", 10}, {"benchy.gcode.3mf", 10}} {
+		if r.removable("S1", idle)(c.name, c.size) {
+			t.Errorf("%s (%d) removable", c.name, c.size)
+		}
+	}
+	running := printers.Snapshot{GcodeState: "RUNNING", Subtask: "SP-11111111-A-P1"}
+	if r.removable("S1", running)("SP-11111111-A-P1.gcode.3mf", 10) {
+		t.Fatal("the running print's file is removable")
+	}
+	if r.removable("S2", idle)("SP-11111111-A-P1.gcode.3mf", 10) {
+		t.Fatal("another printer's manifest was used")
 	}
 }

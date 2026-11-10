@@ -29,6 +29,7 @@ type FTPServer struct {
 	logins    []Connect
 	commands  []string
 	resumed   []bool
+	noDelete  map[string]bool // DELE of these names fails (550)
 	conns     []net.Conn
 	wg        sync.WaitGroup
 }
@@ -55,6 +56,23 @@ func NewFTPServer(t testing.TB, cert tls.Certificate, code string) *FTPServer {
 
 // SetNoStorage makes STOR fail like a printer with no USB stick.
 func (s *FTPServer) SetNoStorage(v bool) { s.mu.Lock(); s.noStorage = v; s.mu.Unlock() }
+
+// Put stores a file as if someone had put it on the USB stick.
+func (s *FTPServer) Put(name string, data []byte) {
+	s.mu.Lock()
+	s.files[name] = append([]byte(nil), data...)
+	s.mu.Unlock()
+}
+
+// FailDelete makes DELE of name answer 550 (n times; -1 for always).
+func (s *FTPServer) FailDelete(name string) {
+	s.mu.Lock()
+	if s.noDelete == nil {
+		s.noDelete = map[string]bool{}
+	}
+	s.noDelete[name] = true
+	s.mu.Unlock()
+}
 
 // SetReply426 makes the server answer 426 after a complete upload.
 func (s *FTPServer) SetReply426(v bool) { s.mu.Lock(); s.reply426 = v; s.mu.Unlock() }
@@ -205,6 +223,15 @@ func (s *FTPServer) serve(c *tls.Conn) {
 			s.receive(dataLn, strings.TrimPrefix(arg, "/"), say)
 			_ = dataLn.Close()
 			dataLn = nil
+		case verb == "LIST":
+			if dataLn == nil {
+				say("425 Use PORT or PASV first.")
+				continue
+			}
+			say("150 Here comes the directory listing.")
+			s.list(dataLn, say)
+			_ = dataLn.Close()
+			dataLn = nil
 		case verb == "SIZE":
 			s.mu.Lock()
 			f, ok := s.files[strings.TrimPrefix(arg, "/")]
@@ -215,9 +242,14 @@ func (s *FTPServer) serve(c *tls.Conn) {
 				say("213 %d", len(f))
 			}
 		case verb == "DELE":
+			name := strings.TrimPrefix(arg, "/")
 			s.mu.Lock()
-			_, ok := s.files[strings.TrimPrefix(arg, "/")]
-			delete(s.files, strings.TrimPrefix(arg, "/"))
+			_, ok := s.files[name]
+			if ok && s.noDelete[name] {
+				ok = false
+			} else {
+				delete(s.files, name)
+			}
 			s.mu.Unlock()
 			if ok {
 				say("250 Delete operation successful.")
@@ -269,4 +301,29 @@ func (s *FTPServer) receive(ln net.Listener, name string, say func(string, ...an
 		return
 	}
 	say("226 Transfer complete.")
+}
+
+// list sends the files in vsftpd 3.0.5's LIST format over a resumed data connection.
+func (s *FTPServer) list(ln net.Listener, say func(string, ...any)) {
+	_ = ln.(*net.TCPListener).SetDeadline(time.Now().Add(10 * time.Second))
+	raw, err := ln.Accept()
+	if err != nil {
+		say("425 Failed to establish connection.")
+		return
+	}
+	defer raw.Close()
+	tc := tls.Server(raw, s.cfg)
+	if err := tc.Handshake(); err != nil || !tc.ConnectionState().DidResume {
+		say("522 SSL connection failed: session reuse required")
+		return
+	}
+	s.mu.Lock()
+	var b strings.Builder
+	for name, data := range s.files {
+		fmt.Fprintf(&b, "-rwxr-xr-x    1 103      107      %9d Nov 10 02:41 %s\r\n", len(data), name)
+	}
+	s.mu.Unlock()
+	_, _ = tc.Write([]byte(b.String()))
+	_ = tc.Close()
+	say("226 Directory send OK.")
 }

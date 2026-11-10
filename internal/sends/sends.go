@@ -54,7 +54,7 @@ type API interface {
 // Printers is the part of the printer manager the runner uses.
 type Printers interface {
 	Get(serial string) (printers.Snapshot, bool)
-	Upload(ctx context.Context, serial, name string, r io.Reader, size int64, progress func(int64)) error
+	UploadClean(ctx context.Context, serial, name string, r io.Reader, size int64, progress func(int64), removable func(name string, size int64) bool) ([]string, error)
 	Delete(ctx context.Context, serial, name string) error
 	StartProjectFile(serial string, pf mqtt.ProjectFile) error
 	AutoStart() bool
@@ -62,17 +62,20 @@ type Printers interface {
 
 // Config for New. Zero durations get production defaults.
 type Config struct {
-	SpoolDir   string
-	StatePath  string
-	API        API
-	Printers   Printers
-	Log        *logx.Logger
-	Now        func() time.Time
-	PollBusy   time.Duration // 15 s while a send is open
-	PollIdle   time.Duration // 60 s
-	Tick       time.Duration // 2 s
-	EventEvery time.Duration // 30 s between progress events
-	MaxAge     time.Duration // 30 min: a send older than this is not started
+	SpoolDir  string
+	StatePath string
+	// ManifestPath lists, per printer, the files the link put on its storage.
+	// Only files in it are ever deleted (default: storage.json next to StatePath).
+	ManifestPath string
+	API          API
+	Printers     Printers
+	Log          *logx.Logger
+	Now          func() time.Time
+	PollBusy     time.Duration // 15 s while a send is open
+	PollIdle     time.Duration // 60 s
+	Tick         time.Duration // 2 s
+	EventEvery   time.Duration // 30 s between progress events
+	MaxAge       time.Duration // 30 min: a send older than this is not started
 }
 
 // Phases of a record.
@@ -128,7 +131,8 @@ type Runner struct {
 
 	mu      sync.Mutex
 	recs    map[string]*record
-	busy    map[string]bool // sends being downloaded or uploaded now
+	files   map[string][]ManifestEntry // serial -> files the link uploaded there
+	busy    map[string]bool            // sends being downloaded or uploaded now
 	errs    map[string]string
 	gen     uint64
 	enabled bool
@@ -167,7 +171,87 @@ func New(cfg Config) (*Runner, error) {
 			r.recs[rec.ID] = rec
 		}
 	}
+	if r.cfg.ManifestPath == "" {
+		r.cfg.ManifestPath = filepath.Join(filepath.Dir(cfg.StatePath), "storage.json")
+	}
+	r.files = map[string][]ManifestEntry{}
+	if err := store.LoadJSON(r.cfg.ManifestPath, &r.files); err != nil {
+		cfg.Log.Warn("could not read the storage manifest; no earlier file will be deleted", "err", err)
+		r.files = map[string][]ManifestEntry{}
+	}
 	return r, nil
+}
+
+// ManifestEntry is one file the link uploaded to a printer. It holds no secrets.
+type ManifestEntry struct {
+	FileName   string    `json:"file_name"`
+	SendID     string    `json:"send_id"`
+	Size       int64     `json:"size"`
+	MD5        string    `json:"md5,omitempty"`
+	UploadedAt time.Time `json:"uploaded_at"`
+}
+
+func (r *Runner) saveManifestLocked() {
+	if err := store.SaveJSON(r.cfg.ManifestPath, r.files); err != nil {
+		r.cfg.Log.Error("could not save the storage manifest", "err", err)
+	}
+}
+
+// removable says whether an earlier file on the printer may be deleted: a
+// reserved name the link uploaded itself (in the manifest), the size it
+// recorded, and not the file of a print that is running now.
+func (r *Runner) removable(serial string, snap printers.Snapshot) func(string, int64) bool {
+	return func(name string, size int64) bool {
+		if !fileNameRe.MatchString(name) {
+			return false
+		}
+		if snap.Busy() && matches(&record{Subtask: strings.TrimSuffix(name, ".gcode.3mf")}, snap) {
+			return false
+		}
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		for _, e := range r.files[serial] {
+			if e.FileName == name && (e.Size <= 0 || e.Size == size) {
+				return true
+			}
+		}
+		return false
+	}
+}
+
+// recordUpload keeps the new file and the earlier ones still there.
+func (r *Runner) recordUpload(serial string, entry ManifestEntry, others []string) {
+	still := map[string]bool{}
+	for _, o := range others {
+		still[o] = true
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var keep []ManifestEntry
+	for _, e := range r.files[serial] {
+		if still[e.FileName] && e.FileName != entry.FileName {
+			keep = append(keep, e)
+		}
+	}
+	r.files[serial] = append(keep, entry)
+	r.saveManifestLocked()
+}
+
+func (r *Runner) forgetFile(serial, name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var keep []ManifestEntry
+	for _, e := range r.files[serial] {
+		if e.FileName != name {
+			keep = append(keep, e)
+		}
+	}
+	if len(keep) == 0 {
+		delete(r.files, serial)
+	} else {
+		r.files[serial] = keep
+	}
+	r.saveManifestLocked()
 }
 
 // SetEnabled turns delivery on once the link is active with its codes open.
@@ -482,7 +566,8 @@ func (r *Runner) deliver(ctx context.Context, s api.Send, gen uint64) {
 	if !r.current(gen) {
 		return
 	}
-	if err := r.upload(ctx, s, rec, path); err != nil {
+	others, err := r.upload(ctx, s, rec, path, snap)
+	if err != nil {
 		return
 	}
 	r.mu.Lock()
@@ -493,7 +578,10 @@ func (r *Runner) deliver(ctx context.Context, s api.Send, gen uint64) {
 	rec.Phase, rec.UploadedAt, rec.LastError = phaseUploaded, r.cfg.Now(), ""
 	r.saveLocked()
 	r.mu.Unlock()
-	_ = r.state(ctx, s.ID, api.StateRequest{State: "uploaded", FileName: s.FileName})
+	if len(others) > 0 {
+		r.cfg.Log.Warn("earlier Spoken Parts files are still on the printer", "serial_tail", ssdp.Tail(s.Printer.Serial), "files", strings.Join(others, ","))
+	}
+	_ = r.state(ctx, s.ID, api.StateRequest{State: "uploaded", FileName: s.FileName, Others: others})
 	r.autoStart(rec, snap)
 }
 
@@ -533,15 +621,15 @@ func (r *Runner) download(ctx context.Context, s api.Send, path string) (*threem
 	return info, nil
 }
 
-func (r *Runner) upload(ctx context.Context, s api.Send, rec *record, path string) error {
+func (r *Runner) upload(ctx context.Context, s api.Send, rec *record, path string, snap printers.Snapshot) ([]string, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer f.Close()
 	st, err := f.Stat()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	zero := 0
 	_ = r.state(ctx, s.ID, api.StateRequest{State: "uploading", Percent: &zero})
@@ -568,15 +656,16 @@ func (r *Runner) upload(ctx context.Context, s api.Send, rec *record, path strin
 		}
 	}()
 	uctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
-	err = r.cfg.Printers.Upload(uctx, s.Printer.Serial, s.FileName, f, st.Size(), func(n int64) {
+	others, err := r.cfg.Printers.UploadClean(uctx, s.Printer.Serial, s.FileName, f, st.Size(), func(n int64) {
 		mu.Lock()
 		sent = n
 		mu.Unlock()
-	})
+	}, r.removable(s.Printer.Serial, snap))
 	cancel()
 	close(done)
 	if err == nil {
-		return nil
+		r.recordUpload(s.Printer.Serial, ManifestEntry{FileName: s.FileName, SendID: s.ID, Size: st.Size(), MD5: rec.MD5, UploadedAt: r.cfg.Now().UTC()}, others)
+		return others, nil
 	}
 	code, reason := "", "The upload failed."
 	switch {
@@ -592,7 +681,7 @@ func (r *Runner) upload(ctx context.Context, s api.Send, rec *record, path strin
 		code, reason = "cant_reach", "The link can't reach the printer."
 	}
 	r.uploadFailed(ctx, s, rec, code, reason)
-	return err
+	return nil, err
 }
 
 // autoStart sends project_file only if everyone allows it. Recorded first.
@@ -834,6 +923,10 @@ func (r *Runner) removeFromPrinter(ctx context.Context, rec *record) {
 	dctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
 	if err := r.cfg.Printers.Delete(dctx, rec.Serial, rec.FileName); err != nil {
+		// It stays in the manifest: the next upload to this printer removes it.
 		r.cfg.Log.Info("could not delete the uploaded file from the printer", "serial_tail", ssdp.Tail(rec.Serial), "err", err)
+		return
 	}
+	r.forgetFile(rec.Serial, rec.FileName)
+	r.cfg.Log.Info("deleted the uploaded file from the printer", "serial_tail", ssdp.Tail(rec.Serial), "file", rec.FileName)
 }

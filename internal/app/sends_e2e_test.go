@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -61,8 +62,8 @@ func newSendsAPI(be *backend) *sendsAPI {
 }
 
 const (
-	fileName = "SP2-SP1052-1-A1B2.gcode.3mf"
-	subtask  = "SP2-SP1052-1-A1B2"
+	fileName = "SP-0a1b2c3d-SP1052-P1.gcode.3mf"
+	subtask  = "SP-0a1b2c3d-SP1052-P1"
 )
 
 // add queues a send for the test printer and returns it.
@@ -702,4 +703,110 @@ func TestRestartAfterAutoStartNeverStartsTwice(t *testing.T) {
 	if w.projectFiles() != 1 {
 		t.Fatalf("project_file sent %d times across a restart", w.projectFiles())
 	}
+}
+
+// ---- STEER 2: only one Spoken Parts file on the printer's storage ----
+
+func writeManifest(t *testing.T, dir string, entries map[string][]sends.ManifestEntry) {
+	t.Helper()
+	b, _ := json.Marshal(entries)
+	if err := os.WriteFile(filepath.Join(dir, "state", "storage.json"), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUploadRemovesOnlyOurEarlierFiles(t *testing.T) {
+	w := newSendsWorld(t, cloudFun, true, false)
+	prev := "SP-11111111-Prev-P1.gcode.3mf"    // ours, in the manifest, same size: deleted
+	resized := "SP-22222222-Prev-P1.gcode.3mf" // ours by name, but its size changed: kept
+	stranger := "SP-deadbeef-Old-P1.gcode.3mf" // reserved name, not in the manifest: kept
+	foreign := "benchy.gcode.3mf"              // not ours: kept
+	for _, n := range []string{prev, resized, stranger, foreign} {
+		w.ftp.Put(n, []byte("old file "+n))
+	}
+	writeManifest(t, w.dir, map[string][]sends.ManifestEntry{serial: {
+		{FileName: prev, SendID: "x", Size: int64(len("old file " + prev))},
+		{FileName: resized, SendID: "y", Size: 1},
+	}})
+	w.restart()
+	fs := w.sa.add(w.file)
+	w.waitState(fs.send.ID, "uploaded")
+	files := w.ftp.Files()
+	if _, ok := files[prev]; ok {
+		t.Fatal("our earlier file was not deleted")
+	}
+	for _, n := range []string{resized, stranger, foreign, fileName} {
+		if _, ok := files[n]; !ok {
+			t.Fatalf("%s was deleted or missing: %v", n, files)
+		}
+	}
+	got := w.sa.lastState(fs.send.ID, "uploaded").Others
+	sort.Strings(got)
+	if strings.Join(got, ",") != resized+","+stranger {
+		t.Fatalf("others %v", got)
+	}
+	// The manifest now holds the new file (and the one it could not prove was ours stays listed).
+	var m map[string][]sends.ManifestEntry
+	b, _ := os.ReadFile(filepath.Join(w.dir, "state", "storage.json"))
+	_ = json.Unmarshal(b, &m)
+	names := []string{}
+	for _, e := range m[serial] {
+		names = append(names, e.FileName)
+	}
+	sort.Strings(names)
+	if strings.Join(names, ",") != fileName+","+resized {
+		t.Fatalf("manifest %v", names)
+	}
+}
+
+func TestDeleteFailsTwiceThenTheOldFileIsNamed(t *testing.T) {
+	w := newSendsWorld(t, cloudFun, true, false)
+	prev := "SP-11111111-Prev-P1.gcode.3mf"
+	w.ftp.Put(prev, []byte("old"))
+	w.ftp.FailDelete(prev)
+	writeManifest(t, w.dir, map[string][]sends.ManifestEntry{serial: {{FileName: prev, SendID: "x", Size: 3}}})
+	w.restart()
+	fs := w.sa.add(w.file)
+	w.waitState(fs.send.ID, "uploaded")
+	if got := w.sa.lastState(fs.send.ID, "uploaded").Others; len(got) != 1 || got[0] != prev {
+		t.Fatalf("others %v", got)
+	}
+	n := 0
+	for _, c := range w.ftp.Commands() {
+		if c == "DELE /"+prev {
+			n++
+		}
+	}
+	if n != 2 {
+		t.Fatalf("DELE tried %d times, want 2 (one retry)", n)
+	}
+}
+
+func TestTheNextUploadRemovesTheLastOneAcrossARestart(t *testing.T) {
+	w := newSendsWorld(t, cloudFun, true, false)
+	first := w.sa.add(w.file)
+	w.waitState(first.send.ID, "uploaded")
+	w.sa.set(first, func(f *fakeSend) { f.state = "cancelled" }) // ended in Spoken Parts
+	waitFor(t, "first file removed", func() bool { _, ok := w.ftp.Files()[fileName]; return !ok })
+	second := w.sa.add(w.file, func(f *fakeSend) {
+		f.send.FileName = "SP-0a1b2c3f-SP1053-P1.gcode.3mf"
+		f.send.SubtaskName = "SP-0a1b2c3f-SP1053-P1"
+	})
+	w.waitState(second.send.ID, "uploaded")
+	w.restart()
+	third := w.sa.add(w.file, func(f *fakeSend) {
+		f.send.FileName = "SP-0a1b2c40-SP1054-P1.gcode.3mf"
+		f.send.SubtaskName = "SP-0a1b2c40-SP1054-P1"
+	})
+	w.sa.set(second, func(f *fakeSend) { f.state = "failed" })
+	w.waitState(third.send.ID, "uploaded")
+	waitFor(t, "only one SP file", func() bool {
+		var sp []string
+		for n := range w.ftp.Files() {
+			if strings.HasPrefix(n, "SP-") {
+				sp = append(sp, n)
+			}
+		}
+		return len(sp) == 1 && sp[0] == "SP-0a1b2c40-SP1054-P1.gcode.3mf"
+	})
 }

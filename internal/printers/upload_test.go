@@ -71,7 +71,7 @@ const cloudReport = `{"print":{"gcode_state":"FINISH","fun":"3EC1AFFF9CFF","sdca
 func TestUploadChecksTheFTPSCertificateBeforeTheCode(t *testing.T) {
 	evil := testutil.NewCA(t, "Not Bambu")
 	m, ftp, _ := uploadRig(t, evil, serial1, cloudReport, false)
-	err := m.Upload(context.Background(), serial1, "SP2-X-1-AAAA.gcode.3mf", strings.NewReader("abc"), 3, nil)
+	err := m.Upload(context.Background(), serial1, "SP-0a1b2c3d-X-P1.gcode.3mf", strings.NewReader("abc"), 3, nil)
 	if !errors.Is(err, ErrCertificate) {
 		t.Fatalf("want ErrCertificate, got %v", err)
 	}
@@ -82,7 +82,7 @@ func TestUploadChecksTheFTPSCertificateBeforeTheCode(t *testing.T) {
 
 func TestUploadChecksTheSerialInTheFTPSCertificate(t *testing.T) {
 	m, ftp, _ := uploadRig(t, nil, "01P00A999999999", cloudReport, false)
-	err := m.Upload(context.Background(), serial1, "SP2-X-1-AAAA.gcode.3mf", strings.NewReader("abc"), 3, nil)
+	err := m.Upload(context.Background(), serial1, "SP-0a1b2c3d-X-P1.gcode.3mf", strings.NewReader("abc"), 3, nil)
 	if !errors.Is(err, ErrCertificate) || len(ftp.Logins()) != 0 {
 		t.Fatalf("another printer's certificate was accepted: %v", err)
 	}
@@ -93,13 +93,13 @@ func TestUploadAndDelete(t *testing.T) {
 	if err := m.Upload(context.Background(), serial1, "../evil.gcode.3mf", strings.NewReader("abc"), 3, nil); err == nil {
 		t.Fatal("bad name accepted")
 	}
-	if err := m.Upload(context.Background(), serial1, "SP2-X-1-AAAA.gcode.3mf", strings.NewReader("abc"), 3, nil); err != nil {
+	if err := m.Upload(context.Background(), serial1, "SP-0a1b2c3d-X-P1.gcode.3mf", strings.NewReader("abc"), 3, nil); err != nil {
 		t.Fatal(err)
 	}
-	if string(ftp.Files()["SP2-X-1-AAAA.gcode.3mf"]) != "abc" {
+	if string(ftp.Files()["SP-0a1b2c3d-X-P1.gcode.3mf"]) != "abc" {
 		t.Fatal("not stored")
 	}
-	if err := m.Delete(context.Background(), serial1, "SP2-X-1-AAAA.gcode.3mf"); err != nil || len(ftp.Files()) != 0 {
+	if err := m.Delete(context.Background(), serial1, "SP-0a1b2c3d-X-P1.gcode.3mf"); err != nil || len(ftp.Files()) != 0 {
 		t.Fatalf("delete: %v", err)
 	}
 	if err := m.Delete(context.Background(), serial1, "model.3mf"); err == nil {
@@ -109,13 +109,13 @@ func TestUploadAndDelete(t *testing.T) {
 	broker.Push([]byte(`{"print":{"sdcard":false}}`))
 	waitFor(t, "no storage", func() bool { s, _ := m.Get(serial1); return s.Storage != nil && !*s.Storage })
 	n := len(ftp.Logins())
-	if err := m.Upload(context.Background(), serial1, "SP2-X-1-AAAA.gcode.3mf", strings.NewReader("abc"), 3, nil); !errors.Is(err, ErrNoStorage) || len(ftp.Logins()) != n {
+	if err := m.Upload(context.Background(), serial1, "SP-0a1b2c3d-X-P1.gcode.3mf", strings.NewReader("abc"), 3, nil); !errors.Is(err, ErrNoStorage) || len(ftp.Logins()) != n {
 		t.Fatalf("no storage: %v", err)
 	}
 }
 
 func TestProjectFileOnlyWithAutoStartAndDeveloperMode(t *testing.T) {
-	pf := mqtt.ProjectFile{Plate: 1, URL: "ftp:///SP2-X-1-AAAA.gcode.3mf", MD5: strings.Repeat("a", 32), SubtaskName: "SP2-X-1-AAAA"}
+	pf := mqtt.ProjectFile{Plate: 1, URL: "ftp:///SP-0a1b2c3d-X-P1.gcode.3mf", MD5: strings.Repeat("a", 32), SubtaskName: "SP-0a1b2c3d-X-P1"}
 	m, _, broker := uploadRig(t, nil, serial1, cloudReport, true)
 	if err := m.StartProjectFile(serial1, pf); !errors.Is(err, ErrAutoStart) {
 		t.Fatalf("Cloud mode printer: %v", err)

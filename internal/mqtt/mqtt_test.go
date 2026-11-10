@@ -300,9 +300,9 @@ func TestAllowedCommandsAreExactlyPushallAndProjectFile(t *testing.T) {
 func goodProjectFile() ProjectFile {
 	return ProjectFile{
 		Plate:        1,
-		URL:          "ftp:///SP2-SP1052-1-A1B2.gcode.3mf",
+		URL:          "ftp:///SP-0a1b2c3d-SP1052-P1.gcode.3mf",
 		MD5:          "0123456789abcdef0123456789abcdef",
-		SubtaskName:  "SP2-SP1052-1-A1B2",
+		SubtaskName:  "SP-0a1b2c3d-SP1052-P1",
 		UseAMS:       true,
 		AmsMapping:   []int{1, -1},
 		AmsMapping2:  []AmsSlot{{AmsID: 0, SlotID: 1}, {AmsID: 255, SlotID: 255}},
@@ -316,7 +316,7 @@ func TestProjectFilePayloadAndChecks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"print":{"ams_mapping":[1,-1],"ams_mapping2":[{"ams_id":0,"slot_id":1},{"ams_id":255,"slot_id":255}],"bed_leveling":true,"bed_type":"auto","command":"project_file","flow_cali":false,"layer_inspect":true,"md5":"0123456789abcdef0123456789abcdef","param":"Metadata/plate_1.gcode","profile_id":"0","project_id":"0","sequence_id":"7","subtask_id":"0","subtask_name":"SP2-SP1052-1-A1B2","task_id":"0","timelapse":false,"url":"ftp:///SP2-SP1052-1-A1B2.gcode.3mf","use_ams":true,"vibration_cali":false}}`
+	want := `{"print":{"ams_mapping":[1,-1],"ams_mapping2":[{"ams_id":0,"slot_id":1},{"ams_id":255,"slot_id":255}],"bed_leveling":true,"bed_type":"auto","command":"project_file","flow_cali":false,"layer_inspect":true,"md5":"0123456789abcdef0123456789abcdef","param":"Metadata/plate_1.gcode","profile_id":"0","project_id":"0","sequence_id":"7","subtask_id":"0","subtask_name":"SP-0a1b2c3d-SP1052-P1","task_id":"0","timelapse":false,"url":"ftp:///SP-0a1b2c3d-SP1052-P1.gcode.3mf","use_ams":true,"vibration_cali":false}}`
 	if string(b) != want {
 		t.Fatalf("payload\n got %s\nwant %s", b, want)
 	}

@@ -214,9 +214,9 @@ type ProjectFile struct {
 }
 
 var (
-	projectURLRe = regexp.MustCompile(`^(ftp:///|file:///sdcard/)SP[0-9]{1,5}-[A-Za-z0-9-]{1,30}\.gcode\.3mf$`)
+	projectURLRe = regexp.MustCompile(`^(ftp:///|file:///sdcard/)SP-[0-9a-f]{8}-[A-Za-z0-9-]{1,18}\.gcode\.3mf$`)
 	md5Re        = regexp.MustCompile(`^[0-9a-f]{32}$`)
-	subtaskRe    = regexp.MustCompile(`^SP[0-9]{1,5}-[A-Za-z0-9-]{1,30}$`)
+	subtaskRe    = regexp.MustCompile(`^SP-[0-9a-f]{8}-[A-Za-z0-9-]{1,18}$`)
 )
 
 // ErrBadCommand means a ProjectFile failed its checks; nothing was sent.

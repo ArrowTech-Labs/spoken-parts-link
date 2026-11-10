@@ -30,7 +30,7 @@ var (
 
 // FileNameRe is the only kind of name the link puts on (and deletes from) a
 // printer's storage: SP<printer>-<ref>-<plate>-<id>.gcode.3mf.
-var FileNameRe = regexp.MustCompile(`^SP[0-9]{1,5}-[A-Za-z0-9-]{1,30}\.gcode\.3mf$`)
+var FileNameRe = regexp.MustCompile(`^SP-[0-9a-f]{8}-[A-Za-z0-9-]{1,18}\.gcode\.3mf$`)
 
 type target struct {
 	ip     netip.Addr
@@ -124,6 +124,64 @@ func (m *Manager) Upload(ctx context.Context, serial, name string, r io.Reader, 
 	}
 	m.cfg.Log.Info("uploaded a file to the printer", "serial_tail", ssdp.Tail(serial), "file", name, "bytes", size)
 	return nil
+}
+
+// UploadClean keeps one Spoken Parts file on the printer's storage. In one
+// session it lists the storage, deletes every earlier file of ours that
+// removable approves (a reserved name the caller's manifest knows, with the
+// size it recorded, and not the running print's), retrying a failed delete
+// once, uploads name, and lists again. It returns the reserved-name files
+// other than name that are still there. Files without a reserved name are
+// never touched.
+func (m *Manager) UploadClean(ctx context.Context, serial, name string, r io.Reader, size int64, progress func(int64), removable func(name string, size int64) bool) ([]string, error) {
+	if !FileNameRe.MatchString(name) {
+		return nil, errors.New("bad file name")
+	}
+	if snap, ok := m.Get(serial); ok && snap.Storage != nil && !*snap.Storage {
+		return nil, ErrNoStorage
+	}
+	c, err := m.ftpSession(ctx, serial)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Quit()
+	tail := ssdp.Tail(serial)
+	if entries, err := c.List(ctx); err == nil {
+		for _, e := range entries {
+			if e.Dir || e.Name == name || !FileNameRe.MatchString(e.Name) || removable == nil || !removable(e.Name, e.Size) {
+				continue
+			}
+			if err := c.Delete("/" + e.Name); err != nil {
+				if err = c.Delete("/" + e.Name); err != nil {
+					m.cfg.Log.Info("could not delete an earlier file from the printer", "serial_tail", tail, "file", e.Name, "err", err)
+					continue
+				}
+			}
+			m.cfg.Log.Info("deleted an earlier Spoken Parts file from the printer", "serial_tail", tail, "file", e.Name)
+		}
+	} else {
+		m.cfg.Log.Info("could not list the printer's storage", "serial_tail", tail, "err", err)
+	}
+	err = c.Store(ctx, "/"+name, r, size, progress)
+	if ftps.Code(err) == 553 {
+		return nil, ErrRefused
+	}
+	if err != nil {
+		m.cfg.Log.Info("upload to printer failed", "serial_tail", tail, "err", err)
+		return nil, err
+	}
+	m.cfg.Log.Info("uploaded a file to the printer", "serial_tail", tail, "file", name, "bytes", size)
+	var others []string
+	entries, err := c.List(ctx)
+	if err != nil {
+		return nil, nil // uploaded and checked by size; the list is only a check
+	}
+	for _, e := range entries {
+		if !e.Dir && e.Name != name && FileNameRe.MatchString(e.Name) {
+			others = append(others, e.Name)
+		}
+	}
+	return others, nil
 }
 
 // Delete removes a file the link uploaded (FileNameRe only).
