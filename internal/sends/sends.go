@@ -103,6 +103,7 @@ type record struct {
 	StartSent    bool        `json:"start_sent,omitempty"`
 	AutoRefused  bool        `json:"auto_refused,omitempty"`
 	WaitingRetry bool        `json:"waiting_retry,omitempty"`
+	FailCode     string      `json:"fail_code,omitempty"`
 	WrongFile    string      `json:"wrong_file,omitempty"`
 	Alerted      bool        `json:"alerted,omitempty"`
 	LastError    string      `json:"last_error,omitempty"`
@@ -424,6 +425,14 @@ func (r *Runner) poll(ctx context.Context) bool {
 			r.busy[s.ID] = true
 			r.saveLocked()
 			r.goDeliver(ctx, s, gen)
+		case rec != nil && rec.Phase == phaseUploaded && (s.LinkState == "" || s.LinkState == "uploading"):
+			// Our "uploaded" report was lost (rate limit, network): say it again.
+			id, name := s.ID, rec.FileName
+			go func() { _ = r.state(ctx, id, api.StateRequest{State: "uploaded", FileName: name}) }()
+		case rec != nil && rec.WaitingRetry && s.LinkState == "uploading":
+			// Our "upload_failed" report was lost: say it again.
+			id, code, reason := s.ID, rec.FailCode, rec.LastError
+			go func() { _ = r.state(ctx, id, api.StateRequest{State: "upload_failed", Code: code, Reason: reason}) }()
 		case rec != nil && rec.Phase == phaseDownloaded && !rec.WaitingRetry:
 			// Downloaded but not uploaded (a restart mid-upload): upload it again
 			// from the spool (or download again if the spool file is gone).
@@ -524,7 +533,7 @@ func (r *Runner) uploadFailed(ctx context.Context, s api.Send, rec *record, code
 		rec = newRecord(s)
 	}
 	rec.WaitingRetry = true
-	rec.LastError = reason
+	rec.LastError, rec.FailCode = reason, code
 	r.recs[s.ID] = rec
 	r.saveLocked()
 	r.mu.Unlock()
@@ -681,7 +690,7 @@ func (r *Runner) upload(ctx context.Context, s api.Send, rec *record, path strin
 	sent := int64(0)
 	done := make(chan struct{})
 	go func() {
-		t := time.NewTicker(2 * time.Second)
+		t := time.NewTicker(10 * time.Second) // gentle on the link's rate limit
 		defer t.Stop()
 		last := -1
 		for {

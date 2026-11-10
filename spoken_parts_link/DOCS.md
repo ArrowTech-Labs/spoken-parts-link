@@ -225,11 +225,11 @@ This is optional. Every release image is signed by our GitHub release workflow.
 To check it yourself, install cosign and the GitHub CLI, then run:
 
 ```
-cosign verify ghcr.io/arrowtech-labs/spoken-parts-link:0.2.1 --certificate-identity-regexp '^https://github.com/ArrowTech-Labs/spoken-parts-link/.github/workflows/release.yml@refs/tags/v' --certificate-oidc-issuer https://token.actions.githubusercontent.com
+cosign verify ghcr.io/arrowtech-labs/spoken-parts-link:0.2.2 --certificate-identity-regexp '^https://github.com/ArrowTech-Labs/spoken-parts-link/.github/workflows/release.yml@refs/tags/v' --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
 ```
-gh attestation verify oci://ghcr.io/arrowtech-labs/spoken-parts-link:0.2.1 --owner ArrowTech-Labs
+gh attestation verify oci://ghcr.io/arrowtech-labs/spoken-parts-link:0.2.2 --owner ArrowTech-Labs
 ```
 
 Both commands should say the check passed. Home Assistant itself does not check

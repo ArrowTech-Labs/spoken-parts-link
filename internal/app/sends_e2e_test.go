@@ -905,3 +905,13 @@ func TestADownloadedSendIsUploadedAfterARestart(t *testing.T) {
 		}
 	}
 }
+
+func TestALostUploadedReportIsSentAgain(t *testing.T) {
+	w := newSendsWorld(t, cloudFun, true, false)
+	fs := w.sa.add(w.file)
+	w.waitState(fs.send.ID, "uploaded")
+	w.sa.set(fs, func(f *fakeSend) { f.linkState = "uploading" }) // as if the report was lost
+	waitFor(t, "uploaded again", func() bool {
+		return strings.Count(strings.Join(w.sa.statesOf(fs.send.ID), ","), "uploaded") >= 2
+	})
+}
