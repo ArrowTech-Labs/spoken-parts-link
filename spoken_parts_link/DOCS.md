@@ -211,7 +211,13 @@ Developer Mode stays off.
   turn it into a JPEG. ffmpeg never sees the access code or the camera address.
 - The last 60 stills per printer are kept here in `/data/frames`. Each still
   also goes to Spoken Parts, where your team sees it on the farm page. Spoken
-  Parts keeps stills for a limited time (set in Spoken Parts).
+  Parts keeps stills for 7 days, and stills from a problem or a failed print
+  for 90 days (settings in Spoken Parts).
+- Spoken Parts can also check the stills with image AI, when the owner turns
+  it on. That runs on the Spoken Parts server, with keys kept there; this app
+  never has or needs an AI key. A quick check looks at each still. If it sees
+  a failure, a smarter check looks at the same still, and you are told to stop
+  the print only when both see it. It costs at most $1 a day.
 
 ## Phone alerts through Home Assistant
 
@@ -222,18 +228,21 @@ other access to Home Assistant: it can only trigger this one automation.
 1. In Home Assistant, go to Settings, Automations, and create an automation.
 2. Add a trigger: Webhook. Pick a long random webhook ID (at least 24
    characters) and keep "Only accessible from the local network" on.
-3. Add an action that notifies your phone. In YAML it looks like this (use the
-   name of your phone's notify service):
+3. Add an action that notifies your phone. In YAML it looks like this, for
+   the Home Assistant mobile app on the phone named "FBI Van 183". Replace the
+   webhook ID with your own, and check your phone's notify service name under
+   Developer Tools, Actions (search "mobile_app"); use that name if it is
+   different:
 
 ```yaml
 alias: Spoken Parts printer alerts
 triggers:
   - trigger: webhook
-    webhook_id: "PUT-YOUR-LONG-RANDOM-ID-HERE"
+    webhook_id: "REPLACE-WITH-A-LONG-RANDOM-ID"
     allowed_methods: [POST]
     local_only: true
 actions:
-  - action: notify.mobile_app_your_phone
+  - action: notify.mobile_app_fbi_van_183
     data:
       title: "{{ trigger.json.title }}"
       message: "{{ trigger.json.message }}"

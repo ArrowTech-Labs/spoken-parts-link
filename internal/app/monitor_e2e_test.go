@@ -276,6 +276,9 @@ func TestMonitorNov10EndToEnd(t *testing.T) {
 		"info state:FINISH +frame",
 		"cleared hms:0C00_0300_0003_0008",
 	}
+	// The last batch (the cleared HMS) may still be on its way when the work queue
+	// is empty, so wait for as many items as expected before comparing them.
+	waitFor(t, "every alert uploaded", func() bool { return len(w.ma.sent()) >= len(want) })
 	if got := w.ma.sent(); !slices.Equal(got, want) {
 		t.Fatalf("alerts:\n got  %q\n want %q\n%s", got, want, w.logs.String())
 	}
