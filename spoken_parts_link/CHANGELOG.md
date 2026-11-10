@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.2
+
+- Upload progress goes to Spoken Parts every 10 seconds instead of every 2, so
+  the link stays well inside its request limit.
+- If Spoken Parts did not get the link's "uploaded" or "upload failed"
+  message (a lost connection), the link sends it again.
+
 ## 0.2.1
 
 Fixes from a review before 0.2.0 was installed anywhere.
