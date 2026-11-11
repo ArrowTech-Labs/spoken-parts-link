@@ -31,6 +31,9 @@ const (
 	// codeSlowRetry is how often the link asks again when Spoken Parts does
 	// not know the new calls yet (404).
 	codeSlowRetry = time.Hour
+	// codeKeyRefresh is how often the key is registered again, in case
+	// Spoken Parts lost it.
+	codeKeyRefresh = 6 * time.Hour
 	// maxHandled ids are remembered so an envelope is never opened twice.
 	// Envelopes expire after 15 minutes, so this is far above normal use.
 	maxHandled = 256
@@ -43,13 +46,14 @@ var sealedSerialRe = regexp.MustCompile(`^[A-Za-z0-9]{6,40}$`)
 // sealedState is guarded by App.mu. It lives in memory only, so the key is
 // registered again on every start.
 type sealedState struct {
-	registered bool
-	keyNext    time.Time
-	keyFails   int
-	codesNext  time.Time
-	codesFails int
-	handled    map[api.EnvelopeID]*handledCode
-	order      []api.EnvelopeID
+	registered   bool
+	registeredAt time.Time
+	keyNext      time.Time
+	keyFails     int
+	codesNext    time.Time
+	codesFails   int
+	handled      map[api.EnvelopeID]*handledCode
+	order        []api.EnvelopeID
 }
 
 type handledCode struct {
@@ -133,7 +137,8 @@ func (a *App) sealedStep(ctx context.Context, s snapshot) {
 	k := a.boxKey
 	ok := a.currentLocked(s) && a.codesReady && k != nil
 	now := a.cfg.Now()
-	needKey := !a.sealed.registered && !now.Before(a.sealed.keyNext)
+	stale := a.sealed.registered && now.Sub(a.sealed.registeredAt) >= a.cfg.CodeKeyRefresh
+	needKey := (!a.sealed.registered || stale) && !now.Before(a.sealed.keyNext)
 	a.mu.Unlock()
 	if !ok {
 		return
@@ -159,6 +164,7 @@ func (a *App) registerBoxKey(ctx context.Context, s snapshot, k *codebox.Key) {
 	now := a.cfg.Now()
 	switch {
 	case notFound(err):
+		a.sealed.registered = false
 		a.sealed.keyNext = now.Add(a.cfg.CodeSlowRetry)
 		a.log.Debug("Spoken Parts does not take access codes typed on its website yet", "retry_in", a.cfg.CodeSlowRetry)
 	case err == nil && id != "" && id != k.ID():
@@ -172,8 +178,14 @@ func (a *App) registerBoxKey(ctx context.Context, s snapshot, k *codebox.Key) {
 		a.sealed.keyNext = now.Add(wait)
 		a.log.Info("could not register the access code key with Spoken Parts", "err", err, "retry_in", wait.Round(time.Second))
 	default:
+		again := a.sealed.registered
 		a.sealed.registered = true
+		a.sealed.registeredAt = now
 		a.sealed.keyFails = 0
+		if again {
+			a.log.Debug("access code key registered again", "key_id", k.ID())
+			return
+		}
 		a.sealed.codesNext = time.Time{}
 		a.log.Info("access codes typed on spokenparts.com can now reach this link", "key_id", k.ID())
 	}
@@ -202,10 +214,20 @@ func (a *App) fetchSealed(ctx context.Context, s snapshot, k *codebox.Key) {
 		return
 	}
 	a.sealed.codesFails = 0
-	a.mu.Unlock()
 	if len(envs) > maxEnvelopes {
 		envs = envs[:maxEnvelopes]
 	}
+	for _, e := range envs {
+		// A new envelope sealed to another key: Spoken Parts may have lost
+		// or replaced this link's key. Register it again on the next cycle.
+		if _, seen := a.sealed.handled[e.ID]; !seen && e.KeyID != k.ID() && a.sealed.registered {
+			a.sealed.registered = false
+			a.sealed.keyNext = time.Time{}
+			a.log.Info("Spoken Parts sent an access code sealed to another key, registering this link's key again")
+			break
+		}
+	}
+	a.mu.Unlock()
 	for _, e := range envs {
 		if ctx.Err() != nil {
 			return
@@ -280,7 +302,14 @@ func (a *App) openSealed(k *codebox.Key, e api.CodeEnvelope) api.CodeResultReque
 		a.log.Warn("a sealed access code from Spoken Parts is not 8 letters or numbers", "serial_tail", tail)
 		return failed(api.ReasonFormat)
 	}
-	switch err := a.SaveCode(e.Serial, code); {
+	// The AAD used the serial exactly as sent; Spoken Parts may change its
+	// case, so save under the serial this link knows the printer by.
+	target, ok := a.printerSerial(e.Serial)
+	if !ok {
+		a.log.Info("an access code typed on spokenparts.com is for a printer this link does not see", "serial_tail", tail)
+		return failed(api.ReasonUnknownPrinter)
+	}
+	switch err := a.SaveCode(target, code); {
 	case err == nil:
 		a.log.Info("access code typed on spokenparts.com saved", "serial_tail", tail)
 		return api.CodeResultRequest{Result: api.ResultSaved}
@@ -294,6 +323,18 @@ func (a *App) openSealed(k *codebox.Key, e api.CodeEnvelope) api.CodeResultReque
 	default:
 		return failed(api.ReasonSaveFailed)
 	}
+}
+
+// printerSerial maps a serial from Spoken Parts to the link's own printer
+// serial: an exact match first, then one that differs only in case.
+func (a *App) printerSerial(serial string) (string, bool) {
+	if a.printers.Has(serial) {
+		return serial, true
+	}
+	if p, ok := a.printers.Get(serial); ok {
+		return p.Serial, true
+	}
+	return "", false
 }
 
 func (a *App) reportSealed(ctx context.Context, s snapshot, id api.EnvelopeID, h *handledCode) {

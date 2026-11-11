@@ -8,12 +8,14 @@
   Spoken Parts passes it on but cannot read it. A sealed code only opens for
   the printer it was typed for and only on this link.
 - The link saves such a code exactly like one typed on the link page, with
-  the same checks, and tells Spoken Parts "saved" or why not. It never opens
-  the same sealed code twice and never logs a code.
+  the same checks, under the serial the printer announced (Spoken Parts may
+  change its case), and tells Spoken Parts "saved" or why not. It does not
+  open the same sealed code twice while it runs, and never logs a code.
 - The link makes a key for this and keeps it encrypted like the access codes.
   It is deleted with the access codes when the link is removed. The bottom of
   the link page shows its short ID, so you can compare it with the one
-  Spoken Parts shows.
+  Spoken Parts shows. The link registers the key again every 6 hours, and
+  when Spoken Parts sends a code sealed to a different key.
 - The link page works as before. With a Spoken Parts that does not support
   this yet, the link stays quiet and asks again once an hour. Nothing else
   changes.

@@ -76,6 +76,8 @@ type Config struct {
 	// 0.4 sealed access codes: how often to ask an older Spoken Parts
 	// again after a 404 (1 hour).
 	CodeSlowRetry time.Duration
+	// How often the code box key is registered again (6 hours).
+	CodeKeyRefresh time.Duration
 }
 
 // FrameGrabber gets one JPEG over an open, checked camera connection.
@@ -148,6 +150,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	def(&cfg.UnknownConfirm, unknownConfirmFor)
 	def(&cfg.UnknownRetry, unknownRetry)
 	def(&cfg.CodeSlowRetry, codeSlowRetry)
+	def(&cfg.CodeKeyRefresh, codeKeyRefresh)
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}

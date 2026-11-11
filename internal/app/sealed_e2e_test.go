@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/api"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/codebox"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/printers"
+	"github.com/ArrowTech-Labs/spoken-parts-link/internal/testutil"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/web"
 )
 
@@ -241,7 +243,9 @@ func TestSealedCodeEndToEnd(t *testing.T) {
 	if pathCount(be, "POST", "/api/link/v1/codes/../x/result") != 0 || len(codes.resultsFor("../x")) != 0 {
 		t.Fatal("bad id reported")
 	}
-	if n := pathCount(be, "POST", "/api/link/v1/code-key"); n != 1 {
+	// The envelope sealed to another key made the link register its key
+	// once more, and only once.
+	if n := pathCount(be, "POST", "/api/link/v1/code-key"); n != 2 {
 		t.Fatalf("code key registered %d times", n)
 	}
 
@@ -260,7 +264,7 @@ func TestSealedCodeEndToEnd(t *testing.T) {
 		t.Fatalf("codebox.enc: %v", err)
 	}
 	h = newHarness(t, dir, be, srv, broker, ca, logs)
-	waitFor(t, "registered again", func() bool { codes.mu.Lock(); defer codes.mu.Unlock(); return len(codes.keys) == 2 })
+	waitFor(t, "registered again", func() bool { codes.mu.Lock(); defer codes.mu.Unlock(); return len(codes.keys) == 3 })
 	if codes.lastKey() != pub {
 		t.Fatal("code box key changed across a restart")
 	}
@@ -276,7 +280,7 @@ func TestSealedCodeEndToEnd(t *testing.T) {
 	}
 	h.post("/pair", url.Values{"code": {pairCode}})
 	be.setAll("active")
-	waitFor(t, "registered after pairing again", func() bool { codes.mu.Lock(); defer codes.mu.Unlock(); return len(codes.keys) == 3 })
+	waitFor(t, "registered after pairing again", func() bool { codes.mu.Lock(); defer codes.mu.Unlock(); return len(codes.keys) == 4 })
 	if codes.lastKey() == pub {
 		t.Fatal("the same code box key after unpairing")
 	}
@@ -335,5 +339,68 @@ func TestSealedCodesOlderBackend(t *testing.T) {
 				t.Fatalf("%d debug lines about the older Spoken Parts", quiet)
 			}
 		})
+	}
+}
+
+// TestSealedCodeSerialCase: Spoken Parts sends the serial upper cased. The
+// envelope is opened with the serial exactly as sent (the AAD), and the code
+// is saved under the serial the printer announced, here in lower case.
+func TestSealedCodeSerialCase(t *testing.T) {
+	dir, be, srv, broker, ca, logs := newWorld(t)
+	codes := newCodesAPI(be)
+	h := newHarness(t, dir, be, srv, broker, ca, logs)
+	defer h.stop()
+	h.post("/pair", url.Values{"code": {pairCode}})
+	be.setAll("active")
+	waitFor(t, "code key registered", func() bool { return codes.lastKey() != "" })
+	lower := strings.ToLower(serial)
+	h.ssdp.Handle(netip.MustParseAddr("192.168.1.40"), testutil.SSDPPacket(lower, "192.168.1.40", "O1D", "H2D"))
+	waitFor(t, "printer", func() bool { ps := h.app.View().Printers; return len(ps) == 1 && ps[0].Serial == lower })
+
+	upper := strings.ToUpper(serial)
+	pub := codes.lastKey()
+	codes.add(t, `"e-upper"`, upper, sealFor(t, pub, upper, accessCode), true)
+	codes.add(t, `"e-aad"`, upper, sealFor(t, pub, lower, accessCode), true) // AAD must match the serial as sent
+	codes.add(t, `"e-none"`, "01P00A000000777", sealFor(t, pub, "01P00A000000777", accessCode), true)
+	waitFor(t, "results", func() bool {
+		return len(codes.resultsFor("e-upper")) == 1 && len(codes.resultsFor("e-aad")) == 1 && len(codes.resultsFor("e-none")) == 1
+	})
+	for id, w := range map[string]api.CodeResultRequest{
+		"e-upper": {Result: "saved"},
+		"e-aad":   {Result: "failed", Reason: "bad_envelope"},
+		"e-none":  {Result: "failed", Reason: "unknown_printer"},
+	} {
+		if got := codes.resultsFor(id)[0]; got != w {
+			t.Errorf("%s: %+v, want %+v", id, got, w)
+		}
+	}
+	if c, ok := h.app.codes.Get(lower); !ok || c != accessCode {
+		t.Fatal("code not saved under the printer's own serial")
+	}
+	if h.app.codes.Has(upper) {
+		t.Fatal("code saved under the serial from Spoken Parts")
+	}
+}
+
+// TestSealedCodeKeyRefresh: the key is registered again from time to time,
+// in case Spoken Parts lost it.
+func TestSealedCodeKeyRefresh(t *testing.T) {
+	dir, be, srv, broker, ca, logs := newWorld(t)
+	codes := newCodesAPI(be)
+	h := newHarness(t, dir, be, srv, broker, ca, logs, func(c *Config) { c.CodeKeyRefresh = 100 * time.Millisecond })
+	defer h.stop()
+	h.post("/pair", url.Values{"code": {pairCode}})
+	be.setAll("active")
+	waitFor(t, "registered three times", func() bool { codes.mu.Lock(); defer codes.mu.Unlock(); return len(codes.keys) >= 3 })
+	codes.mu.Lock()
+	keys := append([]string(nil), codes.keys...)
+	codes.mu.Unlock()
+	for _, k := range keys {
+		if k != keys[0] {
+			t.Fatal("a different key was registered")
+		}
+	}
+	if n := strings.Count(logs.String(), "can now reach this link"); n != 1 {
+		t.Fatalf("info line %d times", n)
 	}
 }

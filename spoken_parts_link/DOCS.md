@@ -121,8 +121,8 @@ The link page keeps working the same way, and you can use either one.
   with the printer. Spoken Parts shows "Working" or asks you to type it again.
 - To seal codes, the link makes its own key for this and tells Spoken Parts
   the public half. The bottom of the link page shows its short ID, "Access
-  code key" and 16 letters and numbers. Spoken Parts shows the same ID where
-  you type the code. If the two ever differ, do not type the code there: use
+  code key" and 16 letters and numbers. Spoken Parts shows the ID of the key
+  it seals to next to the code field. If the two ever differ, do not type the code there: use
   the link page and tell us.
 - This needs Spoken Parts to support it. Until then the website sends you to
   the link page.
