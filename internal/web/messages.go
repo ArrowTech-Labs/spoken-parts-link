@@ -31,6 +31,12 @@ const (
 	MsgAlreadyPaired  Msg = "already_paired"
 	MsgPrinterRemoved Msg = "printer_removed"
 	MsgUnknownLink    Msg = "unknown_link"
+	// 0.3: phone alerts through Home Assistant.
+	MsgHASaved   Msg = "ha_saved"
+	MsgHARemoved Msg = "ha_removed"
+	MsgHAFormat  Msg = "ha_format"
+	MsgHATested  Msg = "ha_tested"
+	MsgHAFailed  Msg = "ha_failed"
 )
 
 // messages is customer facing copy. Plain short sentences, no dashes.
@@ -58,11 +64,17 @@ var messages = map[Msg]string{
 	MsgAlreadyPaired:  "This link is already connected.",
 	MsgPrinterRemoved: "Removed this printer here. It shows up again when it is on. Then type its access code again.",
 	MsgUnknownLink:    "This link isn't known to Spoken Parts any more. Get a new code and pair again.",
+	MsgHASaved:        "Saved. Problems now also go to your phone through Home Assistant.",
+	MsgHARemoved:      "Removed. Problems no longer go to your phone through Home Assistant.",
+	MsgHAFormat:       "The webhook ID is 24 to 128 letters, numbers, dashes or underscores. Copy it from the automation.",
+	MsgHATested:       "Test sent. Check your phone.",
+	MsgHAFailed:       "Home Assistant did not take the test. Check that the automation is on and the webhook ID matches.",
 }
 
 // goodMessages are shown in the calm style; the rest as a warning.
 var goodMessages = map[Msg]bool{
 	MsgSaved: true, MsgTrusted: true, MsgRemovedLocal: true, MsgCancelled: true, MsgPrinterRemoved: true,
+	MsgHASaved: true, MsgHARemoved: true, MsgHATested: true,
 }
 
 // Text returns the copy for m, or "".

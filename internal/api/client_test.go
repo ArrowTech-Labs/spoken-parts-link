@@ -162,3 +162,59 @@ func TestErrorsAndRetryAfter(t *testing.T) {
 		t.Fatalf("redirect must not be followed: %v %v", err, e)
 	}
 }
+
+func TestFrameAndAlertsCalls(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	var paths, types []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if err := signer.Verify(pub, r.Method, r.URL.RequestURI(), r.Header.Get(signer.HeaderTimestamp), r.Header.Get(signer.HeaderNonce), body, r.Header.Get(signer.HeaderSignature)); err != nil {
+			t.Errorf("%s: %v", r.URL.Path, err)
+		}
+		paths = append(paths, r.URL.RequestURI())
+		types = append(types, r.Header.Get("Content-Type"))
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/frames") {
+			w.WriteHeader(201)
+			_, _ = w.Write([]byte(`{"frame_id":"f","duplicate":false,"image_url":"https://x/y"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"accepted":1}`))
+	}))
+	defer srv.Close()
+	u, _ := ParseServer(srv.URL)
+	c := New(u, "9.9.9")
+	jpeg := []byte{0xFF, 0xD8, 0xFF, 0xD9}
+	id := "6f1c3c3e-1f7a-4c62-9d1e-2b8f0c8d9a10"
+	layer := 12
+	ans, err := c.Frame(context.Background(), priv, id, "0947CJ641600041", FrameMeta{ID: id, TakenAt: time.Unix(1762790000, 0), Reason: "alert", Printing: true, TaskID: "1427077046", Layer: &layer, AlertKey: "hms:0C00_0300_0003_0008"}, jpeg)
+	if err != nil || ans.ImageURL != "https://x/y" {
+		t.Fatalf("%v %+v", err, ans)
+	}
+	want := "/api/link/v1/printers/0947CJ641600041/frames?alert_key=hms%3A0C00_0300_0003_0008&id=" + id + "&layer=12&printing=1&reason=alert&task_id=1427077046&ts=1762790000"
+	if paths[0] != want || types[0] != "image/jpeg" {
+		t.Fatalf("frame call %q %q", paths[0], types[0])
+	}
+	if err := c.Alerts(context.Background(), priv, id, "0947CJ641600041", AlertBatch{Cleared: []string{"stall"}}); err != nil || types[1] != "application/json" {
+		t.Fatalf("alerts %v", err)
+	}
+	for _, bad := range []struct {
+		m FrameMeta
+		b []byte
+	}{
+		{FrameMeta{ID: "x", Reason: "alert"}, jpeg},
+		{FrameMeta{ID: id, Reason: "selfie"}, jpeg},
+		{FrameMeta{ID: id, Reason: "alert"}, []byte("GIF89a")},
+		{FrameMeta{ID: id, Reason: "alert"}, append([]byte{0xFF, 0xD8}, make([]byte, MaxFrame)...)},
+	} {
+		if _, err := c.Frame(context.Background(), priv, id, "0947CJ641600041", bad.m, bad.b); err == nil {
+			t.Errorf("accepted %+v", bad.m)
+		}
+	}
+	if err := c.Alerts(context.Background(), priv, id, "0947CJ641600041", AlertBatch{}); err == nil {
+		t.Error("empty alerts call accepted")
+	}
+	if len(paths) != 2 {
+		t.Errorf("bad calls reached the server: %q", paths)
+	}
+}

@@ -13,8 +13,9 @@ profile spoken_parts_link flags=(attach_disconnected,mediate_deleted) {
   capability setuid,
   capability setgid,
 
-  # HTTPS to Spoken Parts, MQTT over TLS and FTPS uploads (port 990) to
-  # printers, the discovery listener
+  # HTTPS to Spoken Parts, MQTT over TLS, FTPS uploads (port 990) and the
+  # RTSPS camera (port 322) of printers, Home Assistant's webhook on this
+  # host (127.0.0.1:8123, phone alerts), the discovery listener
   # on UDP 2021 and the ingress page. Go lists interfaces over netlink.
   network inet stream,
   network inet dgram,
@@ -59,11 +60,25 @@ profile spoken_parts_link flags=(attach_disconnected,mediate_deleted) {
   @{PROC}/@{pid}/mountinfo r,
   @{PROC}/@{pid}/stat r,
 
-  # The app's private data folder (options, key, encrypted codes, state).
+  # 0.3: camera stills. ffmpeg runs under this same profile (ix), reads the
+  # H.264 frame on stdin and writes the JPEG to stdout. It needs its own
+  # binary, the shared libraries and the CPU count; nothing else.
+  /usr/bin/ffmpeg ix,
+  /lib/ld-musl-*.so.1 mr,
+  /lib/*.so* mr,
+  /usr/lib/*.so* mr,
+  /usr/lib/**/*.so* mr,
+  @{PROC}/cpuinfo r,
+  /sys/devices/system/cpu/ r,
+  /sys/devices/system/cpu/** r,
+
+  # The app's private data folder (options, key, encrypted codes, state,
+  # camera frames in /data/frames).
   /data/ r,
   /data/** rwk,
   /tmp/ r,
   /tmp/** rwk,
 
-  # No exec rules: the profile allows running no other program.
+  # The only exec rule is ffmpeg above: the profile allows running no other
+  # program, and no shell is in the image.
 }

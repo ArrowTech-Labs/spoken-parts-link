@@ -60,6 +60,16 @@ is also the app's Documentation tab in Home Assistant.
   are plain files readable only by the app (encrypting them on the same disk
   would not help). They are in Home Assistant backups, so a backup plus its
   password can act as the link until it is removed in Spoken Parts.
+- **Monitoring (0.3).** When the site turns it on in Spoken Parts, fixed
+  rules (no model) run on each printer's reports every 30 seconds and raise
+  alerts (`internal/monitor`; the Nov 10 H2D incident is a test fixture).
+  Camera stills come from the printer's RTSPS stream on port 322: the link
+  does the TLS (same Bambu CA and serial check) and the RTSP login itself, takes
+  one H.264 key frame and pipes it to ffmpeg on stdin (`internal/rtsp`,
+  `internal/camera`). ffmpeg gets no URL, no code and an empty environment,
+  and AppArmor lets the app run no other program. Alerts and stills go to
+  Spoken Parts over the signed API. Optional phone alerts go to one Home
+  Assistant webhook automation on the same host; its id is stored encrypted.
 - **The link page** only answers Home Assistant's ingress proxy. It has no
   scripts, a strict content security policy and a CSRF token on every form.
 

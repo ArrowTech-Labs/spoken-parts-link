@@ -14,11 +14,16 @@ import (
 	"time"
 
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/logx"
+	"github.com/ArrowTech-Labs/spoken-parts-link/internal/monitor"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/printers"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/redact"
 )
 
 type fakeCtrl struct {
+	haID     string
+	haLevel  string
+	haTested bool
+	haGone   bool
 	view     View
 	pairCode string
 	saved    map[string]string
@@ -46,6 +51,10 @@ func (f *fakeCtrl) RemovePrinter(serial string) error {
 	f.removed = serial
 	return nil
 }
+func (f *fakeCtrl) SaveHA(id, level string) error { f.haID, f.haLevel = id, level; return nil }
+func (f *fakeCtrl) SetHAMin(level string) error   { f.haLevel = level; return nil }
+func (f *fakeCtrl) RemoveHA() error               { f.haGone = true; return nil }
+func (f *fakeCtrl) TestHA(context.Context) error  { f.haTested = true; return nil }
 
 const ingress = "172.30.32.2"
 
@@ -379,5 +388,68 @@ func TestPairedAndPendingPagesHaveNoAutofocus(t *testing.T) {
 		if strings.Contains(page, `id="pair-code"`) || strings.Contains(page, `action="/pair"`) {
 			t.Errorf("%s page shows the code entry form", v.Phase)
 		}
+	}
+}
+
+func TestCameraStatusOnThePage(t *testing.T) {
+	v := activeView
+	v.MonitorOn = true
+	v.Monitor = map[string]monitor.Status{"01P00A000000001": {Camera: monitor.CamStreamOff, OpenAlerts: 2, Waiting: 1}}
+	_, _, h, _ := newServer(t, v)
+	page := html.UnescapeString(do(h, "GET", "/", ingress, nil, nil).Body.String())
+	for _, want := range []string{"Turn on LAN Only Liveview on the printer", "Open alerts</dt><dd>2. 1 waiting to go to Spoken Parts."} {
+		if !strings.Contains(page, want) {
+			t.Errorf("page lacks %q", want)
+		}
+	}
+	v.Monitor["01P00A000000001"] = monitor.Status{Camera: monitor.CamOK, LastFrameAt: time.Now().Add(-3 * time.Minute)}
+	_, _, h, _ = newServer(t, v)
+	if page := do(h, "GET", "/", ingress, nil, nil).Body.String(); !strings.Contains(page, "On Last frame 3 minutes ago.") {
+		t.Errorf("camera ok line missing")
+	}
+	v.MonitorOn = false
+	_, _, h, _ = newServer(t, v)
+	if page := do(h, "GET", "/", ingress, nil, nil).Body.String(); !strings.Contains(page, "Monitoring is off.") || strings.Contains(page, "Open alerts") {
+		t.Errorf("monitoring off text")
+	}
+}
+
+func TestHomeAssistantForms(t *testing.T) {
+	v := activeView
+	v.HAReady = true
+	_, f, h, red := newServer(t, v)
+	page := do(h, "GET", "/", ingress, nil, nil).Body.String()
+	if !strings.Contains(page, `name="webhook"`) || !strings.Contains(page, `type="password" id="ha-id"`) {
+		t.Fatal("no webhook form")
+	}
+	id := "Xk3-9_abcdefghijklmnopqrstuvwxyz012345"
+	w := do(h, "POST", "/ha", ingress, url.Values{"csrf": {csrf(t, page)}, "webhook": {"http://homeassistant.local:8123/api/webhook/" + id}, "level": {"critical"}}, nil)
+	if !strings.Contains(w.Header().Get("Location"), "m=ha_saved") || f.haID != id || f.haLevel != "critical" {
+		t.Fatalf("save: %q %q %q", w.Header().Get("Location"), f.haID, f.haLevel)
+	}
+	if out := red.Redact("x " + id); strings.Contains(out, id) {
+		t.Fatal("webhook id not redacted")
+	}
+	w = do(h, "POST", "/ha", ingress, url.Values{"csrf": {csrf(t, page)}, "webhook": {"short"}}, nil)
+	if !strings.Contains(w.Header().Get("Location"), "m=ha_format") {
+		t.Fatalf("short id: %q", w.Header().Get("Location"))
+	}
+	w = do(h, "POST", "/ha", ingress, url.Values{"webhook": {id}}, nil)
+	if !strings.Contains(w.Header().Get("Location"), "m=bad_form") {
+		t.Fatal("saved without csrf")
+	}
+
+	v.HASet, v.HAMin = true, "warning"
+	_, f, h, _ = newServer(t, v)
+	page = do(h, "GET", "/", ingress, nil, nil).Body.String()
+	if strings.Contains(page, id) || !strings.Contains(page, "warnings and critical problems") || strings.Contains(page, `name="webhook"`) {
+		t.Fatal("set up page wrong")
+	}
+	tok := csrf(t, page)
+	do(h, "POST", "/ha/test", ingress, url.Values{"csrf": {tok}}, nil)
+	do(h, "POST", "/ha/level", ingress, url.Values{"csrf": {tok}, "level": {"info"}}, nil)
+	do(h, "POST", "/ha/remove", ingress, url.Values{"csrf": {tok}}, nil)
+	if !f.haTested || f.haLevel != "info" || !f.haGone {
+		t.Fatalf("%+v", f)
 	}
 }

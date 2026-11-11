@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.3.0
+
+- Watches each printer for problems, when an owner turns monitoring on in
+  Spoken Parts. The rules run on the link, so they work with the internet
+  down: failed and paused prints, new printer messages (any message from the
+  AI camera is critical), objects skipped in a short time, no progress,
+  temperatures off target, lost contact, and the finish. The same alert is
+  not repeated for 30 minutes unless it gets worse.
+- Camera stills from the printer's own camera, per printer, when the camera is
+  turned on in Spoken Parts and LAN Only Liveview is on at the printer (Cloud
+  mode stays). One every 2 minutes while printing, one with each problem and
+  one at the end; none while idle. The link reads the stream itself and gives
+  ffmpeg only one picture: ffmpeg never sees the access code.
+- Alerts and stills go to Spoken Parts, where your team sees them on the farm
+  page.
+- Optional phone alerts through one Home Assistant automation (a local
+  webhook). No new Home Assistant permission. The webhook ID is stored
+  encrypted.
+- The link page shows each printer's camera and open alerts.
+- The link never pauses, stops or skips anything. People decide.
+
 ## 0.2.2
 
 - Upload progress goes to Spoken Parts every 10 seconds instead of every 2, so
