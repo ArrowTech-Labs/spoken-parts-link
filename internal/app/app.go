@@ -593,6 +593,7 @@ func (a *App) buildSync() api.SyncRequest {
 			CertFingerprint: p.CertFingerprint,
 			Storage:         p.Storage,
 			AMS:             syncTrays(p.Trays),
+			AmsUnits:        syncUnits(p.AmsUnits),
 			Nozzles:         syncNozzles(p.Nozzles),
 			SubtaskName:     p.Subtask,
 			GcodeFile:       p.GcodeFile,
@@ -621,7 +622,24 @@ func syncTrays(ts []printers.Tray) []api.SyncTray {
 		if len(out) >= 64 {
 			break
 		}
-		out = append(out, api.SyncTray{AmsID: t.AmsID, SlotID: t.SlotID, Type: t.Type, Color: t.Color, Nozzle: t.Nozzle})
+		out = append(out, api.SyncTray{
+			AmsID: t.AmsID, SlotID: t.SlotID, Type: t.Type, Color: t.Color, Nozzle: t.Nozzle,
+			TrayUUID: t.UUID, InfoIdx: t.InfoIdx, Remain: t.Remain,
+		})
+	}
+	return out
+}
+
+func syncUnits(us []printers.AmsUnit) []api.SyncAmsUnit {
+	var out []api.SyncAmsUnit
+	for _, u := range us {
+		if len(out) >= 16 {
+			break
+		}
+		out = append(out, api.SyncAmsUnit{
+			AmsID: u.ID, HumidityRaw: u.HumidityRaw, Humidity: u.Humidity, Temp: u.Temp,
+			DryTime: u.DryTime, DrySfReason: u.DrySfReason,
+		})
 	}
 	return out
 }

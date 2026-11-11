@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.0
+
+- Reports each AMS unit's humidity, humidity level, temperature and drying
+  state (time left, and why drying can't run), and each slot's RFID tray id,
+  filament preset id and how much is left, with the printer status it already
+  sends. Spoken Parts uses them to track how wet each roll is (SPOK-FAIL-1).
+  Older Spoken Parts versions ignore the new fields.
+- Nothing new is sent to the printers. The link still only reads their status.
+
 ## 0.5.0
 
 - Prints labels on a Bluetooth label printer through Home Assistant. You set
