@@ -30,7 +30,9 @@ Raspberry Pi.
   mode, and in Cloud mode only Bambu's own apps or a person at the printer can
   start a print. Someone taps the file on the printer screen.
 - It never sends your printer access codes to Spoken Parts. They stay on this
-  device, and only go to the printer they belong to.
+  device, and only go to the printer they belong to. A code you type on
+  spokenparts.com is sealed to this link in your browser, so Spoken Parts
+  cannot read it either (see "Type a code on spokenparts.com" below).
 - It sends only two kinds of message to a printer: a request for its full
   status (called "pushall"), at most once every 5 minutes, and the file upload
   (FTPS, port 990). Camera stills are read from the printer's own camera
@@ -102,6 +104,28 @@ You can type access codes only after the link is connected to Spoken Parts.
 The codes are stored encrypted. Opening them needs a secret on this device and
 a key that Spoken Parts gives only to this link. See "What is stored on this
 device" below for what that does and does not protect.
+
+### Type a code on spokenparts.com
+
+From version 0.4 you can also type a printer's access code on
+spokenparts.com, for example on your phone while you stand at the printer.
+The link page keeps working the same way, and you can use either one.
+
+- Your browser seals the code to this link before it leaves your phone or
+  computer. Only this link can open it. Spoken Parts passes the sealed code on
+  but cannot read it, and deletes it once the link has it, or after 15
+  minutes.
+- A sealed code works only for the printer it was typed for and only for this
+  link.
+- The link then saves it exactly like a code typed on this page, and checks it
+  with the printer. Spoken Parts shows "Working" or asks you to type it again.
+- To seal codes, the link makes its own key for this and tells Spoken Parts
+  the public half. The bottom of the link page shows its short ID, "Access
+  code key" and 16 letters and numbers. Spoken Parts shows the same ID where
+  you type the code. If the two ever differ, do not type the code there: use
+  the link page and tell us.
+- This needs Spoken Parts to support it. Until then the website sends you to
+  the link page.
 
 ## Printer certificates
 
@@ -291,6 +315,8 @@ a backup.
   folder and in the same backups.
 - **The Home Assistant webhook ID: encrypted,** the same way as the access
   codes, in its own file.
+- **The key for codes typed on spokenparts.com: encrypted,** the same way as
+  the access codes, in its own file. It is deleted with the access codes.
 - **Monitor state and camera stills: not encrypted.** What each printer last
   reported, which alerts were sent, and the last 60 stills per printer.
 
@@ -320,7 +346,8 @@ link here") and in Spoken Parts, then connect that one again with a new code.
 ## Remove the link
 
 1. On the link page, tap "Remove this link here" and confirm. This deletes the
-   access codes and the link key on this device.
+   access codes, the key for codes typed on spokenparts.com and the link key on
+   this device.
 2. Also remove the link in Spoken Parts, on your site's Network setup page.
 3. You can then uninstall the app in Home Assistant under Settings, then Apps.
 

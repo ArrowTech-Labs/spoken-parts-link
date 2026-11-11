@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.0
+
+- You can type a printer's access code on spokenparts.com, for example on
+  your phone at the printer. Your browser seals it to this link (scheme
+  `sp-code-v1`: P-256 key agreement, HKDF-SHA256 and AES-256-GCM), so
+  Spoken Parts passes it on but cannot read it. A sealed code only opens for
+  the printer it was typed for and only on this link.
+- The link saves such a code exactly like one typed on the link page, with
+  the same checks, and tells Spoken Parts "saved" or why not. It never opens
+  the same sealed code twice and never logs a code.
+- The link makes a key for this and keeps it encrypted like the access codes.
+  It is deleted with the access codes when the link is removed. The bottom of
+  the link page shows its short ID, so you can compare it with the one
+  Spoken Parts shows.
+- The link page works as before. With a Spoken Parts that does not support
+  this yet, the link stays quiet and asks again once an hour. Nothing else
+  changes.
+
 ## 0.3.1
 
 - Phone alerts now reach a Home Assistant that serves only https on port

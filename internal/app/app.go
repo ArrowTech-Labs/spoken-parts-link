@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/api"
+	"github.com/ArrowTech-Labs/spoken-parts-link/internal/codebox"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/fsutil"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/hanotify"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/identity"
@@ -71,6 +72,10 @@ type Config struct {
 	CameraPort  int
 	HAURL       string        // ha_url option; "" tries http, then https, on 127.0.0.1:8123
 	MonitorTick time.Duration // 30 s
+
+	// 0.4 sealed access codes: how often to ask an older Spoken Parts
+	// again after a 404 (1 hour).
+	CodeSlowRetry time.Duration
 }
 
 // FrameGrabber gets one JPEG over an open, checked camera connection.
@@ -85,6 +90,7 @@ type App struct {
 	red      *redact.Redactor
 	api      *api.Client
 	codes    *store.Codes
+	box      *store.Codes // the code box private key (0.4)
 	printers *printers.Manager
 	sends    *sends.Runner
 	monitor  *monitor.Runner
@@ -110,6 +116,11 @@ type App struct {
 	unknownCount int
 	// pairBlockedUntil honours Retry-After from a throttled pair call.
 	pairBlockedUntil time.Time
+
+	// boxKey opens access codes typed on spokenparts.com; nil until the
+	// access codes are open.
+	boxKey *codebox.Key
+	sealed sealedState
 }
 
 // unknown_link must be seen this many times in a row, over at least this
@@ -136,6 +147,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	def(&cfg.RetryMax, 5*time.Minute)
 	def(&cfg.UnknownConfirm, unknownConfirmFor)
 	def(&cfg.UnknownRetry, unknownRetry)
+	def(&cfg.CodeSlowRetry, codeSlowRetry)
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
@@ -145,6 +157,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		red:       cfg.Log.Redactor(),
 		api:       api.New(cfg.Server, cfg.Version),
 		codes:     store.NewCodes(filepath.Join(cfg.DataDir, "secrets", "codes.enc")),
+		box:       store.NewCodes(filepath.Join(cfg.DataDir, "secrets", "codebox.enc")),
 		started:   cfg.Now(),
 		wake:      make(chan struct{}, 1),
 		idDir:     filepath.Join(cfg.DataDir, "identity"),
@@ -386,6 +399,7 @@ func (a *App) stepActive(ctx context.Context, s snapshot) {
 	}
 	resp, err := a.api.Sync(ctx, s.key, s.linkID, a.buildSync())
 	var wait time.Duration
+	synced := false
 	a.mu.Lock()
 	switch {
 	case !a.currentLocked(s):
@@ -430,8 +444,12 @@ func (a *App) stepActive(ctx context.Context, s snapshot) {
 			a.monitor.SetSettings(ms)
 		}
 		wait = a.nextSync(resp.NextSyncS)
+		synced = true
 	}
 	a.mu.Unlock()
+	if synced {
+		a.sealedStep(ctx, s)
+	}
 	if wait > 0 {
 		a.sleep(ctx, wait)
 	}
@@ -504,6 +522,7 @@ func (a *App) loadDataKey(ctx context.Context, s snapshot) bool {
 		a.log.Error("could not read saved access codes", "err", err)
 		return false
 	}
+	a.openBoxLocked(s.id.LocalSecret, dk)
 	for _, c := range a.codes.Values() {
 		a.red.Add(c)
 	}
@@ -717,6 +736,7 @@ func (a *App) resetLocked(notice web.Msg, wipe bool) {
 	a.sends.Reset()
 	a.monitor.Reset()
 	a.ha.Lock()
+	a.wipeBoxLocked(wipe)
 	if wipe {
 		a.printers.ResetAccess()
 		if err := a.codes.Wipe(); err != nil {
@@ -766,6 +786,9 @@ func (a *App) View() web.View {
 		CodesReady:   a.codesReady,
 		CodesDamaged: a.codesReady && a.codes.Damaged(),
 		Version:      a.cfg.Version,
+	}
+	if a.boxKey != nil {
+		v.CodeKeyID = a.boxKey.ID()
 	}
 	switch a.st.Status {
 	case store.StatusPending:

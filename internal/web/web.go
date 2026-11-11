@@ -65,6 +65,10 @@ type View struct {
 	HAReady   bool // the encrypted settings are open
 	HASet     bool
 	HAMin     string
+	// 0.4: the id of the key that access codes typed on spokenparts.com
+	// are sealed to ("" until the access codes are open). Spoken Parts
+	// shows the same id where the code is typed.
+	CodeKeyID string
 }
 
 // Controller is the app behind the page.

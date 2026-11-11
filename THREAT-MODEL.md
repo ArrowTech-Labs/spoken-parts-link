@@ -1,8 +1,8 @@
 # Threat model: Spoken Parts Link
 
-This covers the link program in this repository (version 0.3: status,
-uploading the prints Spoken Parts sends, and watching printers with camera
-stills), its
+This covers the link program in this repository (version 0.4: status,
+uploading the prints Spoken Parts sends, watching printers with camera
+stills, and access codes typed on spokenparts.com and sealed to the link), its
 pairing with Spoken Parts, the data it keeps on the device, and how release
 images are built. It is written for customers, auditors and contributors.
 
@@ -25,6 +25,9 @@ images are built. It is written for customers, auditors and contributors.
 6. **The release pipeline.** Whatever it ships runs on customer networks.
 7. **Print files.** The sliced files Spoken Parts sends. They are customers'
    parts, so they are kept only while they are delivered.
+8. **The code box key.** From version 0.4, a P-256 key pair that access codes
+   typed on spokenparts.com are sealed to. Only the link holds the private
+   half, encrypted like the access codes (see 4.10).
 
 ## 2. Who might attack
 
@@ -86,7 +89,7 @@ images are built. It is written for customers, auditors and contributors.
 | Home Assistant admin users | They can open the link page. Access code fields are write only: the page never shows a saved code. |
 | Cross site requests | Every form needs a CSRF token. The page has no scripts, a strict content security policy and only same origin framing. |
 | Codes in add-on options | Access codes are never add-on options, because options are stored in plain text and shown on the Configuration tab. |
-| Logs | One logger for the whole program. Every line passes a redactor that removes access codes, the pairing code, the data key and key material. |
+| Logs | One logger for the whole program. Every line passes a redactor that removes access codes, the pairing code, the data key and key material. A code opened from a sealed envelope is registered with the redactor before anything else uses it. |
 
 ### 4.5 Stolen device or disk
 
@@ -130,9 +133,10 @@ device and pair it again.
 ### 4.7 Compromised Spoken Parts backend
 
 A compromised backend can see status data and can stop links (by revoking them).
-It cannot read access codes: they are never sent. From version 0.2 it can put a
-file on a printer's USB stick, with a name the link chooses the shape of
-(`SP<printer>-...gcode.3mf`). It cannot start that file: printers stay in Cloud
+It cannot read access codes the link holds: they are never sent. Codes typed on
+spokenparts.com after the compromise are a different matter (see 4.10).
+From version 0.2 it can put a file on a printer's USB stick, with a name the
+link chooses the shape of (`SP<printer>-...gcode.3mf`). It cannot start that file: printers stay in Cloud
 mode, and a person must tap it on the printer screen. Auto start exists only
 for Developer Mode printers, behind an option that is off and is not an app
 option. It cannot send any other command: the MQTT client has no general
@@ -168,7 +172,29 @@ on the printer: the link deletes only files it uploaded itself.
 | Alerts that act on printers | None. The monitor never sends a printer command; the MQTT allow list is unchanged (pushall, and project_file behind the off flag). |
 | Signed still links | Stills attached to alerts can come with a 24 hour signed link for the phone notification. The link registers it with the log redactor. |
 
-### 4.10 Supply chain (B4)
+### 4.10 Access codes typed on spokenparts.com (B1)
+
+From version 0.4 an owner or maintenance tech can type a printer's access code
+on spokenparts.com instead of on the link page. The browser seals it to the
+link (scheme `sp-code-v1`): an ephemeral P-256 key agreement with the link's
+code box public key, HKDF-SHA256 (salt: the ephemeral public key, info:
+`sp-code-v1`) and AES-256-GCM with additional data `sp-code-v1|<serial>|<key_id>`.
+Spoken Parts stores only the envelope, for at most 15 minutes, and deletes it
+once the link reports a result.
+
+| Threat | Mitigation |
+|---|---|
+| Spoken Parts (or its database, logs or backups) reads the code | It only ever has the envelope. Opening it needs the link's private key, which never leaves the device. |
+| Replay to another printer or another link | The serial and the key id are in the AES-GCM additional data. An envelope opens only for the printer it was sealed for and only with the key it was sealed to. |
+| Tampered or malformed envelope | The link checks the scheme, that the key id is its own, and the exact sizes (65, 12 and 24 bytes) before it does anything, then the GCM tag. It refuses anything else as `bad_envelope` and logs no detail. |
+| Bad code | The opened code must be exactly 8 letters or numbers. It is then saved through the same path, with the same checks, as a code typed on the link page: the link must be paired and its codes open, and the printer must be one the link sees. |
+| Opening twice | The link remembers the envelopes it has handled and never opens one again. It only resends a result Spoken Parts did not get. |
+| Code in logs | The opened code goes to the log redactor first. The shared secret and the AES key are never logged and are cleared after use. Tests check the code is in no log line, request or plain file. |
+| Stolen box key | The private key is kept in its own AES-256-GCM file, keyed like the access codes (HKDF of the local secret and the data key, info `code-box-v1`), and is deleted with the access codes when the link is removed or revoked. A new pairing makes a new key. |
+| Older Spoken Parts | The new calls answer 404. The link logs that at debug level only and asks again once an hour. The sync and everything else carry on. |
+| Compromised Spoken Parts swaps the key | Spoken Parts relays the link's public key to the browser, so a compromised server could show its own key and read codes typed on the website afterwards. This is the same trust the link already places in the signed channel to Spoken Parts, and a compromised server could also change the page that does the sealing. Mitigations: the link registers its key only over its signed channel; the link page footer shows the key id ("Access code key ..."), and Spoken Parts shows the key id where the code is typed, so an owner can compare them; codes typed on the link page never touch Spoken Parts. Owners who do not want to rely on this keep using the link page. |
+
+### 4.11 Supply chain (B4)
 
 | Threat | Mitigation |
 |---|---|
@@ -203,3 +229,8 @@ on the printer: the link deletes only files it uploaded itself.
    no network use of its own, but it can read the app's data folder.
 10. **Host compromise.** An app with full access, or a compromise of the Home
    Assistant host, can read everything on that host, including this app's data.
+11. **Codes typed on spokenparts.com trust Spoken Parts to relay the right key
+   and serve the right page.** A compromised Spoken Parts could swap the key
+   and read codes typed on its website from then on (section 4.10). Comparing
+   the key id with the link page footer detects a swap. Codes typed on the
+   link page are not affected.

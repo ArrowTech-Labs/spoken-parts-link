@@ -60,6 +60,15 @@ is also the app's Documentation tab in Home Assistant.
   are plain files readable only by the app (encrypting them on the same disk
   would not help). They are in Home Assistant backups, so a backup plus its
   password can act as the link until it is removed in Spoken Parts.
+- **Codes typed on spokenparts.com (0.4).** The browser seals the code to the
+  link's own P-256 key (`sp-code-v1`: ECDH, HKDF-SHA256, AES-256-GCM with the
+  serial and key id as additional data, `internal/codebox`). Spoken Parts
+  relays the envelope but cannot open it. The link opens it, puts the code in
+  the log redactor first, saves it through the same path as the link page and
+  reports the result. The private key is stored encrypted like the access
+  codes and deleted with them; the page footer shows its key id. A Python
+  test vector (`internal/codebox/testdata`) checks the Go code against an
+  independent implementation.
 - **Monitoring (0.3).** When the site turns it on in Spoken Parts, fixed
   rules (no model) run on each printer's reports every 30 seconds and raise
   alerts (`internal/monitor`; the Nov 10 H2D incident is a test fixture).

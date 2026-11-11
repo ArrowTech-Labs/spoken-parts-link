@@ -1,6 +1,6 @@
 # Spoken Parts Link image. Build from the repository root, for example:
 #   docker buildx build -f spoken_parts_link/Dockerfile \
-#     --platform linux/amd64,linux/arm64 --build-arg VERSION=0.3.1 .
+#     --platform linux/amd64,linux/arm64 --build-arg VERSION=0.4.0 .
 #
 # build.yaml is deprecated (2026-04), so the base image, arguments and labels
 # all live here. The builder image is pinned by digest.
@@ -13,7 +13,7 @@ ARG FFMPEG_VERSION=6.1.2-r2
 FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS build
 ARG TARGETOS=linux
 ARG TARGETARCH
-ARG VERSION=0.3.1
+ARG VERSION=0.4.0
 WORKDIR /src
 COPY go.mod ./
 COPY cmd ./cmd
@@ -41,7 +41,7 @@ FROM scratch AS base-arm64
 LABEL io.hass.arch="aarch64"
 
 FROM base-${TARGETARCH}
-ARG VERSION=0.3.1
+ARG VERSION=0.4.0
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=ffmpeg /rootfs/lib/ /lib/
 COPY --from=ffmpeg /rootfs/usr/lib/ /usr/lib/
