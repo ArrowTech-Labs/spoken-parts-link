@@ -140,7 +140,7 @@ func ParseBase(s string) (string, error) {
 
 // isLoopback reports whether host (no port) is an address in 127.0.0.0/8 or
 // ::1. Names, even "localhost", are not: only literal addresses count.
-func IsLoopback(host string) bool {
+func isLoopback(host string) bool {
 	a, err := netip.ParseAddr(host)
 	return err == nil && a.Unmap().IsLoopback()
 }
