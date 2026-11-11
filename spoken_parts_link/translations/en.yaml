@@ -4,3 +4,10 @@ configuration:
     description: >-
       How much the app writes to its log. Use "info" unless support asks for
       "debug". Access codes and keys are never written to the log.
+  ha_url:
+    name: Home Assistant address for phone alerts
+    description: >-
+      Leave empty. The link then finds Home Assistant on this device by itself,
+      over http or https. Only set this if phone alerts do not arrive, for
+      example https://192.168.1.10:8123. Type only the address and port, not
+      the webhook.

@@ -257,6 +257,14 @@ mode: queued
    default), or everything.
 5. Tap "Send a test".
 
+The link finds Home Assistant on this device by itself, over http or https.
+If your Home Assistant uses https, the link does not check its certificate for
+this one local address, because that certificate never names it. If the test
+says Home Assistant could not be reached, set "Home Assistant address for
+phone alerts" on the app's Configuration tab to the address you use, for
+example `https://192.168.1.10:8123` (address and port only). For an address
+other than this device's own, the certificate must be valid.
+
 The webhook ID is kept encrypted, like the access codes, and is never shown
 again or sent to Spoken Parts. The picture in the notification is a link to
 the still in Spoken Parts that works for 24 hours.

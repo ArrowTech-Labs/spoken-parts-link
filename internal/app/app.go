@@ -69,7 +69,7 @@ type Config struct {
 	// (internal/camera with ffmpeg in production).
 	Grabber     FrameGrabber
 	CameraPort  int
-	HAURL       string        // Home Assistant, http://127.0.0.1:8123
+	HAURL       string        // ha_url option; "" tries http, then https, on 127.0.0.1:8123
 	MonitorTick time.Duration // 30 s
 }
 
@@ -182,7 +182,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		return nil, err
 	}
 	a.printers = m
-	a.ha = hanotify.New(cfg.HAURL, store.NewCodes(filepath.Join(cfg.DataDir, "secrets", "ha.enc")), a.red)
+	a.ha = hanotify.New(cfg.HAURL, store.NewCodes(filepath.Join(cfg.DataDir, "secrets", "ha.enc")), a.red, cfg.Log)
 	a.monitor = monitor.New(monitor.Config{
 		StatePath: filepath.Join(cfg.DataDir, "state", "monitor.json"),
 		FramesDir: filepath.Join(cfg.DataDir, "frames"),

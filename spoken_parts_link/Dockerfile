@@ -1,11 +1,11 @@
 # Spoken Parts Link image. Build from the repository root, for example:
 #   docker buildx build -f spoken_parts_link/Dockerfile \
-#     --platform linux/amd64,linux/arm64 --build-arg VERSION=0.3.0 .
+#     --platform linux/amd64,linux/arm64 --build-arg VERSION=0.3.1 .
 #
 # build.yaml is deprecated (2026-04), so the base image, arguments and labels
 # all live here. The builder image is pinned by digest.
 
-ARG GO_IMAGE=golang:1.27-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb
+ARG GO_IMAGE=golang:1.27-alpine@sha256:eb61c3873c97416fff0116553fff65d67a3549f72e11d9758849a689cdd8b523
 # 0.3: ffmpeg for camera stills comes from Alpine (alpine:3.22, pinned).
 ARG ALPINE_IMAGE=alpine:3.22@sha256:49340b346798875b5592e5d420241f2f9cfba5f47e62ebb1446a1b34734e898f
 ARG FFMPEG_VERSION=6.1.2-r2
@@ -13,7 +13,7 @@ ARG FFMPEG_VERSION=6.1.2-r2
 FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS build
 ARG TARGETOS=linux
 ARG TARGETARCH
-ARG VERSION=0.3.0
+ARG VERSION=0.3.1
 WORKDIR /src
 COPY go.mod ./
 COPY cmd ./cmd
@@ -41,7 +41,7 @@ FROM scratch AS base-arm64
 LABEL io.hass.arch="aarch64"
 
 FROM base-${TARGETARCH}
-ARG VERSION=0.3.0
+ARG VERSION=0.3.1
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=ffmpeg /rootfs/lib/ /lib/
 COPY --from=ffmpeg /rootfs/usr/lib/ /usr/lib/
