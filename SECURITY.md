@@ -18,7 +18,7 @@ Spoken Parts accounts. Use your own equipment and test accounts.
 
 | Version | Supported |
 |---|---|
-| 0.1.x | Yes (latest release only) |
+| 0.4.x | Yes (latest release only) |
 
 The app is experimental. Fixes ship as a new release. Update in Home Assistant
 under Settings, then Apps.

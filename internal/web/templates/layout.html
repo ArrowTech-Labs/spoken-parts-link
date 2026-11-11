@@ -14,7 +14,7 @@
 {{end}}
 
 {{define "foot"}}
-<footer>Spoken Parts Link {{.Version}}. Status only: it reads printer status and never starts a print.</footer>
+<footer>Spoken Parts Link {{.Version}}. Status only: it reads printer status and never starts a print.{{if .CodeKeyID}} Access code key {{.CodeKeyID}}.{{end}}</footer>
 </main>
 </body>
 </html>

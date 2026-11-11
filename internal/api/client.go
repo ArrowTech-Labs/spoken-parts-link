@@ -585,6 +585,97 @@ func (c *Client) DataKey(ctx context.Context, key ed25519.PrivateKey, linkID str
 	return raw, nil
 }
 
+// CodeScheme is the sealed access code scheme the link speaks (0.4).
+const CodeScheme = "sp-code-v1"
+
+// RegisterCodeKey calls POST code-key with the link's code box public key
+// (uncompressed P-256, base64url without padding). It returns the key id
+// Spoken Parts computed. An older Spoken Parts answers 404.
+func (c *Client) RegisterCodeKey(ctx context.Context, key ed25519.PrivateKey, linkID, publicKey string) (string, error) {
+	var out struct {
+		KeyID string `json:"key_id"`
+	}
+	in := map[string]string{"public_key": publicKey, "scheme": CodeScheme}
+	if err := c.do(ctx, key, linkID, http.MethodPost, "code-key", in, &out); err != nil {
+		return "", err
+	}
+	return out.KeyID, nil
+}
+
+// EnvelopeID is a sealed code's id. Spoken Parts may send it as a JSON
+// string or number.
+type EnvelopeID string
+
+// UnmarshalJSON accepts a string or a number.
+func (e *EnvelopeID) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err == nil {
+		*e = EnvelopeID(s)
+		return nil
+	}
+	var n json.Number
+	if err := json.Unmarshal(b, &n); err != nil {
+		return err
+	}
+	*e = EnvelopeID(n.String())
+	return nil
+}
+
+// CodeEnvelope is one sealed access code waiting for this link. Only the
+// link can open it.
+type CodeEnvelope struct {
+	ID         EnvelopeID `json:"id"`
+	Scheme     string     `json:"scheme"` // may be missing: then sp-code-v1
+	Serial     string     `json:"serial"`
+	KeyID      string     `json:"key_id"`
+	EPK        string     `json:"epk"`
+	Nonce      string     `json:"nonce"`
+	Ciphertext string     `json:"ciphertext"`
+	ExpiresAt  string     `json:"expires_at"`
+}
+
+// Codes calls GET codes: this link's pending sealed access codes. An older
+// Spoken Parts answers 404.
+func (c *Client) Codes(ctx context.Context, key ed25519.PrivateKey, linkID string) ([]CodeEnvelope, error) {
+	var out struct {
+		Codes []CodeEnvelope `json:"codes"`
+	}
+	if err := c.do(ctx, key, linkID, http.MethodGet, "codes", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Codes, nil
+}
+
+// Sealed code results and reasons for POST codes/<id>/result.
+const (
+	ResultSaved  = "saved"
+	ResultFailed = "failed"
+
+	ReasonBadEnvelope    = "bad_envelope"
+	ReasonUnknownPrinter = "unknown_printer"
+	ReasonNotReady       = "not_ready"
+	ReasonSaveFailed     = "save_failed"
+	ReasonFormat         = "format"
+)
+
+// CodeResultRequest is the body of POST codes/<id>/result.
+type CodeResultRequest struct {
+	Result string `json:"result"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// EnvelopeIDRe is the shape of an envelope id the link accepts (it goes in
+// a path).
+var EnvelopeIDRe = regexp.MustCompile(`^[A-Za-z0-9-]{1,64}$`)
+
+// CodeResult calls POST codes/<id>/result.
+func (c *Client) CodeResult(ctx context.Context, key ed25519.PrivateKey, linkID string, id EnvelopeID, req CodeResultRequest) error {
+	if !EnvelopeIDRe.MatchString(string(id)) {
+		return errors.New("bad sealed code id")
+	}
+	return c.do(ctx, key, linkID, http.MethodPost, "codes/"+string(id)+"/result", req, nil)
+}
+
 func (c *Client) do(ctx context.Context, key ed25519.PrivateKey, linkID, method, path string, in, out any) error {
 	var body []byte
 	if in != nil {
