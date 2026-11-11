@@ -18,6 +18,23 @@ type Tray struct {
 	// "right", or "" (one nozzle, or not known).
 	Nozzle string
 	feeds  int // extruder id from the AMS info bits, -1 unknown
+	// SPOK-FAIL-1: the RFID tray id ("" when the roll has no Bambu tag), the
+	// filament preset id, and remain in percent (nil when the printer doesn't know).
+	UUID    string
+	InfoIdx string
+	Remain  *int
+}
+
+// AmsUnit is one AMS unit's humidity, temperature and drying state (SPOK-FAIL-1).
+// Each field is nil until the printer reported it.
+type AmsUnit struct {
+	ID          int
+	HumidityRaw *float64 // RH in percent (newer firmware)
+	Humidity    *int     // the 1..5 index
+	Temp        *float64 // C
+	DryTime     *int     // minutes of drying left
+	DrySfReason []string // why drying can't run (power, filament at the outlet)
+	sfKnown     bool
 }
 
 // Nozzle is one nozzle as the printer last reported it.
@@ -66,6 +83,7 @@ type liveUpdate struct {
 	mapKnown   bool
 	nozzles    []Nozzle
 	command    *CommandResult
+	units      []AmsUnit
 }
 
 type trayUpdate struct {
@@ -73,6 +91,9 @@ type trayUpdate struct {
 	feeds         int
 	typ           *string
 	color         *string
+	uuid          *string
+	infoIdx       *string
+	remain        *int
 }
 
 func parseLive(payload []byte) (liveUpdate, bool) {
@@ -100,6 +121,12 @@ func parseLive(payload []byte) (liveUpdate, bool) {
 					ID   json.RawMessage              `json:"id"`
 					Info string                       `json:"info"`
 					Tray []map[string]json.RawMessage `json:"tray"`
+					// SPOK-FAIL-1: humidity and drying, per unit.
+					Humidity    *json.RawMessage   `json:"humidity"`
+					HumidityRaw *json.RawMessage   `json:"humidity_raw"`
+					Temp        *json.RawMessage   `json:"temp"`
+					DryTime     *json.RawMessage   `json:"dry_time"`
+					DrySfReason *[]json.RawMessage `json:"dry_sf_reason"`
 				} `json:"ams"`
 				TrayNow *json.RawMessage `json:"tray_now"`
 			} `json:"ams"`
@@ -202,6 +229,9 @@ func parseLive(payload []byte) (liveUpdate, bool) {
 			if info, err := strconv.ParseUint(strings.TrimSpace(unit.Info), 16, 32); err == nil {
 				feeds = int(info>>8) & 0xF
 			}
+			if au, ok := parseUnit(id, unit.Humidity, unit.HumidityRaw, unit.Temp, unit.DryTime, unit.DrySfReason); ok {
+				u.units = append(u.units, au)
+			}
 			for _, tr := range unit.Tray {
 				rawID, ok := tr["id"]
 				slot, ok2 := flexInt(&rawID)
@@ -224,6 +254,26 @@ func parseLive(payload []byte) (liveUpdate, bool) {
 					c := trayColor(s)
 					t.color = &c
 				}
+				if raw, ok := tr["tray_uuid"]; ok {
+					var s string
+					_ = json.Unmarshal(raw, &s)
+					s = trayID(s, 40)
+					t.uuid = &s
+				}
+				if raw, ok := tr["tray_info_idx"]; ok {
+					var s string
+					_ = json.Unmarshal(raw, &s)
+					s = trayID(s, 12)
+					t.infoIdx = &s
+				}
+				if raw, ok := tr["remain"]; ok {
+					if n, ok := flexInt(&raw); ok {
+						if n < 0 || n > 100 {
+							n = -1 // the printer doesn't know
+						}
+						t.remain = &n
+					}
+				}
 				u.trays = append(u.trays, t)
 			}
 		}
@@ -239,6 +289,71 @@ func parseLive(payload []byte) (liveUpdate, bool) {
 		u.nozzles = []Nozzle{{ID: 0, Diameter: d}}
 	}
 	return u, true
+}
+
+// parseUnit reads one AMS unit's humidity fields. ok is false when it has none.
+func parseUnit(id int, humidity, raw, temp, dry *json.RawMessage, reasons *[]json.RawMessage) (AmsUnit, bool) {
+	u := AmsUnit{ID: id}
+	if n, ok := flexInt(humidity); ok && n >= 1 && n <= 5 {
+		u.Humidity = &n
+	}
+	if f, ok := flexFloat(raw); ok && f >= 0 && f <= 100 {
+		u.HumidityRaw = &f
+	}
+	if f, ok := flexFloat(temp); ok && f > -20 && f < 150 {
+		u.Temp = &f
+	}
+	if n, ok := flexInt(dry); ok && n >= 0 && n <= 100000 {
+		u.DryTime = &n
+	}
+	if reasons != nil {
+		u.sfKnown = true
+		for i, r := range *reasons {
+			if i >= 8 {
+				break
+			}
+			var s string
+			if json.Unmarshal(r, &s) != nil {
+				s = string(r)
+			}
+			if s = cleanText(s, 40); s != "" {
+				u.DrySfReason = append(u.DrySfReason, s)
+			}
+		}
+	}
+	ok := u.Humidity != nil || u.HumidityRaw != nil || u.Temp != nil || u.DryTime != nil || u.sfKnown
+	return u, ok
+}
+
+// flexFloat reads a number sent as a number or a string ("24", "25.3").
+func flexFloat(raw *json.RawMessage) (float64, bool) {
+	if raw == nil {
+		return 0, false
+	}
+	var f float64
+	if err := json.Unmarshal(*raw, &f); err == nil {
+		return f, true
+	}
+	var s string
+	if json.Unmarshal(*raw, &s) != nil {
+		return 0, false
+	}
+	f, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	return f, err == nil
+}
+
+// trayID keeps letters and digits only (an RFID tray uuid or a preset id).
+func trayID(s string, max int) string {
+	var b strings.Builder
+	for _, r := range strings.TrimSpace(s) {
+		if b.Len() >= max {
+			break
+		}
+		if (r >= '0' && r <= '9') || (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // trayColor turns "RRGGBBAA" into "#RRGGBB".
@@ -302,6 +417,7 @@ type live struct {
 	nozzles      map[int]Nozzle
 	command      *CommandResult
 	commandSeq   int
+	units        map[int]AmsUnit
 }
 
 func (l *live) apply(u liveUpdate) {
@@ -351,7 +467,47 @@ func (l *live) apply(u liveUpdate) {
 		if t.color != nil && cur.Type != "" {
 			cur.Color = *t.color
 		}
+		if t.uuid != nil {
+			cur.UUID = *t.uuid
+		}
+		if t.infoIdx != nil {
+			cur.InfoIdx = *t.infoIdx
+		}
+		if t.remain != nil {
+			if *t.remain < 0 {
+				cur.Remain = nil
+			} else {
+				n := *t.remain
+				cur.Remain = &n
+			}
+		}
+		if t.typ != nil && *t.typ == "" {
+			cur.UUID, cur.InfoIdx, cur.Remain = "", "", nil
+		}
 		l.trays[key] = cur
+	}
+	if l.units == nil {
+		l.units = map[int]AmsUnit{}
+	}
+	for _, nu := range u.units {
+		cur := l.units[nu.ID]
+		cur.ID = nu.ID
+		if nu.Humidity != nil {
+			cur.Humidity = nu.Humidity
+		}
+		if nu.HumidityRaw != nil {
+			cur.HumidityRaw = nu.HumidityRaw
+		}
+		if nu.Temp != nil {
+			cur.Temp = nu.Temp
+		}
+		if nu.DryTime != nil {
+			cur.DryTime = nu.DryTime
+		}
+		if nu.sfKnown {
+			cur.DrySfReason = nu.DrySfReason
+		}
+		l.units[nu.ID] = cur
 	}
 	if len(u.nozzles) > 0 {
 		l.nozzles = map[int]Nozzle{}
@@ -378,6 +534,17 @@ func sideOf(id int, twoNozzles bool) string {
 		return "left"
 	}
 	return ""
+}
+
+// amsUnits is every unit's last humidity report, by unit id.
+func (l *live) amsUnits() []AmsUnit {
+	var out []AmsUnit
+	for _, u := range l.units {
+		u.DrySfReason = append([]string(nil), u.DrySfReason...)
+		out = append(out, u)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
 }
 
 func (l *live) snapshot() (trays []Tray, nozzles []Nozzle) {

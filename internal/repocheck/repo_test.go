@@ -110,7 +110,7 @@ func TestConfigYAML(t *testing.T) {
 	m := topLevel(s)
 	want := map[string]string{
 		"name":           `"Spoken Parts Link"`,
-		"version":        `"0.3.1"`,
+		"version":        `"0.3.2"`,
 		"slug":           "spoken_parts_link",
 		"url":            `"https://github.com/ArrowTech-Labs/spoken-parts-link"`,
 		"image":          `"ghcr.io/arrowtech-labs/spoken-parts-link"`,
