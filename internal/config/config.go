@@ -37,6 +37,9 @@ type Config struct {
 	// AutoStart lets the link start prints itself on Developer Mode printers
 	// (project_file). Off unless SP_LINK_AUTOSTART is "true".
 	AutoStart bool
+	// HAURL is the ha_url option (Home Assistant for phone alerts). Empty
+	// means automatic; internal/hanotify checks it.
+	HAURL string
 }
 
 // Load reads env (through getenv) and <data>/options.json.
@@ -76,10 +79,14 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 	var opts struct {
 		LogLevel string `json:"log_level"`
+		HAURL    string `json:"ha_url"`
 	}
 	if b, err := os.ReadFile(filepath.Join(c.DataDir, "options.json")); err == nil {
-		if json.Unmarshal(b, &opts) == nil && opts.LogLevel != "" {
-			c.LogLevel = opts.LogLevel
+		if json.Unmarshal(b, &opts) == nil {
+			if opts.LogLevel != "" {
+				c.LogLevel = opts.LogLevel
+			}
+			c.HAURL = strings.TrimSpace(opts.HAURL)
 		}
 	}
 	return c, nil

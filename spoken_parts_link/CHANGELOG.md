@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.1
+
+- Phone alerts now reach a Home Assistant that serves only https on port
+  8123. The link tries http first and then https on this device, and keeps
+  the one that works. For this one local address the link does not check
+  Home Assistant's certificate, because that certificate never names this
+  device's own address. Any other address is always checked.
+- New optional setting, "Home Assistant address for phone alerts"
+  (`ha_url`), for a Home Assistant the link cannot find by itself. Leave it
+  empty unless phone alerts do not arrive.
+- The link log says once which address reached Home Assistant. It never
+  shows the webhook ID.
+
 ## 0.3.0
 
 - Watches each printer for problems, when an owner turns monitoring on in

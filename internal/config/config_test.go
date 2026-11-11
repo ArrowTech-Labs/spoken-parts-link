@@ -52,3 +52,21 @@ func TestRejectsBadValues(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadHAURL(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "options.json"), []byte(`{"log_level":"info","ha_url":" https://192.168.2.75:8123 "}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(env(map[string]string{"SP_LINK_DATA": dir}))
+	if err != nil || c.HAURL != "https://192.168.2.75:8123" || c.LogLevel != "info" {
+		t.Fatalf("%+v %v", c, err)
+	}
+	// Not set: automatic.
+	if err := os.WriteFile(filepath.Join(dir, "options.json"), []byte(`{"log_level":"info"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if c, _ := Load(env(map[string]string{"SP_LINK_DATA": dir})); c.HAURL != "" {
+		t.Fatalf("HAURL %q", c.HAURL)
+	}
+}

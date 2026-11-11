@@ -88,6 +88,8 @@ func run() error {
 		Bundle:  bundle,
 		// Off unless SP_LINK_AUTOSTART=true (Developer Mode printers only).
 		AutoStart: cfg.AutoStart,
+		// 0.3.1: ha_url option; empty tries http, then https, on this host.
+		HAURL: cfg.HAURL,
 		// 0.3: camera stills. The link does the RTSPS session itself and
 		// hands ffmpeg only the H.264 key frame on stdin: no URL, no code.
 		Grabber: &camera.Grabber{FFmpeg: camera.DefaultFFmpeg},

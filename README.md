@@ -69,7 +69,8 @@ is also the app's Documentation tab in Home Assistant.
   `internal/camera`). ffmpeg gets no URL, no code and an empty environment,
   and AppArmor lets the app run no other program. Alerts and stills go to
   Spoken Parts over the signed API. Optional phone alerts go to one Home
-  Assistant webhook automation on the same host; its id is stored encrypted.
+  Assistant webhook automation on the same host (or the `ha_url` option);
+  its id is stored encrypted.
 - **The link page** only answers Home Assistant's ingress proxy. It has no
   scripts, a strict content security policy and a CSRF token on every form.
 
