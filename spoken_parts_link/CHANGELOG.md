@@ -12,6 +12,8 @@
   empty unless phone alerts do not arrive.
 - The link log says once which address reached Home Assistant. It never
   shows the webhook ID.
+- Built with Go 1.27.4, which fixes a security problem in Go's web code
+  (GO-2026-6859).
 
 ## 0.3.0
 
