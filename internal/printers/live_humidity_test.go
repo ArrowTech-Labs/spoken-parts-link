@@ -140,3 +140,43 @@ func TestHexWord(t *testing.T) {
 		}
 	}
 }
+
+// Review fixes: a dry that ends clears the setting; a partial setting merges;
+// a wrongly typed new field never drops the rest of the report; an all-zero
+// tray_uuid (no RFID tag) is not passed on as an id.
+func TestDrySettingEndsMergesAndLenient(t *testing.T) {
+	var l live
+	u, _ := parseLive([]byte(x2dDrying))
+	l.apply(u)
+	// Partial: only the hours change.
+	u, _ = parseLive([]byte(`{"print":{"ams":{"ams":[{"id":"0","dry_setting":{"dry_duration":11}}]}}}`))
+	l.apply(u)
+	d := l.amsUnits()[0].DrySetting
+	if d == nil || *d.TempC != 65 || *d.Hours != 11 || d.Filament != "PETG" {
+		t.Fatalf("partial %+v", d)
+	}
+	// The dry ended: the printer sends an idle setting.
+	u, _ = parseLive([]byte(`{"print":{"ams":{"ams":[{"id":"0","dry_time":0,
+		"dry_setting":{"dry_temperature":-1,"dry_duration":-1,"dry_filament":""}}]}}}`))
+	l.apply(u)
+	if got := l.amsUnits()[0].DrySetting; got != nil {
+		t.Fatalf("idle setting kept %+v", got)
+	}
+	// Wrongly typed new fields: the rest of the message still counts.
+	u, ok := parseLive([]byte(`{"print":{"layer_num":7,"ams":{"tray_now":"1","ams":[{"id":"128","humidity_raw":"12",
+		"dry_sf_reason":0,"dry_setting":"x"}]}}}`))
+	if !ok || u.layer == nil || *u.layer != 7 || u.trayNow == nil || len(u.units) != 1 {
+		t.Fatalf("bad types dropped the report: ok=%v %+v", ok, u)
+	}
+	if u.units[0].sfKnown || u.units[0].dryKnown || *u.units[0].HumidityRaw != 12 {
+		t.Fatalf("bad types %+v", u.units[0])
+	}
+	// No RFID tag.
+	l2 := live{}
+	u, _ = parseLive([]byte(h2dHumidity))
+	l2.apply(u)
+	trays, _ := l2.snapshot()
+	if trays[1].UUID != "" {
+		t.Fatalf("zero uuid passed on: %q", trays[1].UUID)
+	}
+}

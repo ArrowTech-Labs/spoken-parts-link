@@ -43,6 +43,11 @@ type AmsUnit struct {
 	InfoRaw    string
 	DrySetting *DrySetting
 	TrayExist  string
+	// dryKnown: this report carried a dry_setting; dryPatch is what it said,
+	// field by field. A field that is idle (-1, 0 or "", as the printer sends
+	// when no dry is set) clears that field; a field not sent is kept.
+	dryKnown bool
+	dryPatch *dryPatch
 	// hasData: the unit reported humidity, temperature or drying at least once.
 	// A unit with only its info word is never synced (an all-empty humidity
 	// sample would mean nothing to Spoken Parts).
@@ -143,16 +148,14 @@ func parseLive(payload []byte) (liveUpdate, bool) {
 					Info string                       `json:"info"`
 					Tray []map[string]json.RawMessage `json:"tray"`
 					// SPOK-FAIL-1: humidity and drying, per unit.
-					Humidity    *json.RawMessage   `json:"humidity"`
-					HumidityRaw *json.RawMessage   `json:"humidity_raw"`
-					Temp        *json.RawMessage   `json:"temp"`
-					DryTime     *json.RawMessage   `json:"dry_time"`
-					DrySfReason *[]json.RawMessage `json:"dry_sf_reason"`
-					DrySetting  *struct {
-						Temp     *json.RawMessage `json:"dry_temperature"`
-						Duration *json.RawMessage `json:"dry_duration"`
-						Filament *json.RawMessage `json:"dry_filament"`
-					} `json:"dry_setting"`
+					Humidity    *json.RawMessage `json:"humidity"`
+					HumidityRaw *json.RawMessage `json:"humidity_raw"`
+					Temp        *json.RawMessage `json:"temp"`
+					DryTime     *json.RawMessage `json:"dry_time"`
+					// Decoded leniently below: a wrongly typed value drops only
+					// that field, never the rest of the report.
+					DrySfReason *json.RawMessage `json:"dry_sf_reason"`
+					DrySetting  *json.RawMessage `json:"dry_setting"`
 				} `json:"ams"`
 				TrayNow       *json.RawMessage `json:"tray_now"`
 				TrayExistBits *json.RawMessage `json:"tray_exist_bits"`
@@ -264,10 +267,26 @@ func parseLive(payload []byte) (liveUpdate, bool) {
 			if info, err := strconv.ParseUint(strings.TrimSpace(unit.Info), 16, 32); err == nil {
 				feeds = int(info>>8) & 0xF
 			}
-			au, _ := parseUnit(id, unit.Humidity, unit.HumidityRaw, unit.Temp, unit.DryTime, unit.DrySfReason)
+			var reasons *[]json.RawMessage
+			if unit.DrySfReason != nil {
+				var rs []json.RawMessage
+				if json.Unmarshal(*unit.DrySfReason, &rs) == nil {
+					reasons = &rs
+				}
+			}
+			au, _ := parseUnit(id, unit.Humidity, unit.HumidityRaw, unit.Temp, unit.DryTime, reasons)
 			au.InfoRaw = hexWord(unit.Info)
-			if ds := unit.DrySetting; ds != nil {
-				au.DrySetting = parseDrySetting(ds.Temp, ds.Duration, ds.Filament)
+			if unit.DrySetting != nil {
+				var ds struct {
+					Temp     *json.RawMessage `json:"dry_temperature"`
+					Duration *json.RawMessage `json:"dry_duration"`
+					Filament *json.RawMessage `json:"dry_filament"`
+				}
+				if json.Unmarshal(*unit.DrySetting, &ds) == nil {
+					au.dryPatch = parseDrySetting(ds.Temp, ds.Duration, ds.Filament)
+					au.dryKnown = au.dryPatch != nil
+					au.DrySetting = au.dryPatch.setting()
+				}
 			}
 			au.hasData = unitHasData(au)
 			if au.hasData || au.InfoRaw != "" {
@@ -299,6 +318,9 @@ func parseLive(payload []byte) (liveUpdate, bool) {
 					var s string
 					_ = json.Unmarshal(raw, &s)
 					s = trayID(s, 40)
+					if strings.Trim(s, "0") == "" {
+						s = "" // all zeros: a roll without a Bambu RFID tag
+					}
 					t.uuid = &s
 				}
 				if raw, ok := tr["tray_info_idx"]; ok {
@@ -369,28 +391,64 @@ func parseUnit(id int, humidity, raw, temp, dry *json.RawMessage, reasons *[]jso
 // unitHasData is true when a unit report carries anything worth syncing.
 func unitHasData(u AmsUnit) bool {
 	return u.Humidity != nil || u.HumidityRaw != nil || u.Temp != nil || u.DryTime != nil ||
-		u.sfKnown || u.DrySetting != nil
+		u.sfKnown || u.dryKnown
 }
 
-// parseDrySetting reads an AMS unit's dry_setting. nil when it has nothing usable.
-func parseDrySetting(temp, dur, fil *json.RawMessage) *DrySetting {
+// dryPatch is one report's dry_setting: which fields it carried and their values
+// (nil or "" when idle or out of range).
+type dryPatch struct {
+	hasTemp, hasHours, hasFilament bool
+	DrySetting
+}
+
+// setting is the patch on its own (nil when it sets nothing).
+func (p *dryPatch) setting() *DrySetting {
+	if p == nil {
+		return nil
+	}
+	return p.applyTo(nil)
+}
+
+// applyTo merges the patch into cur and returns the result (nil when no field is set).
+func (p *dryPatch) applyTo(cur *DrySetting) *DrySetting {
 	var d DrySetting
-	if n, ok := flexInt(temp); ok && n > 0 && n <= 150 {
-		d.TempC = &n
+	if cur != nil {
+		d = *cur
 	}
-	if n, ok := flexInt(dur); ok && n > 0 && n <= 96 {
-		d.Hours = &n
+	if p.hasTemp {
+		d.TempC = p.TempC
 	}
-	if fil != nil {
-		var s string
-		if json.Unmarshal(*fil, &s) == nil {
-			d.Filament = cleanText(s, 24)
-		}
+	if p.hasHours {
+		d.Hours = p.Hours
+	}
+	if p.hasFilament {
+		d.Filament = p.Filament
 	}
 	if d.TempC == nil && d.Hours == nil && d.Filament == "" {
 		return nil
 	}
 	return &d
+}
+
+// parseDrySetting reads an AMS unit's dry_setting. nil when it carried no field.
+func parseDrySetting(temp, dur, fil *json.RawMessage) *dryPatch {
+	if temp == nil && dur == nil && fil == nil {
+		return nil
+	}
+	p := &dryPatch{hasTemp: temp != nil, hasHours: dur != nil, hasFilament: fil != nil}
+	if n, ok := flexInt(temp); ok && n > 0 && n <= 150 {
+		p.TempC = &n
+	}
+	if n, ok := flexInt(dur); ok && n > 0 && n <= 96 {
+		p.Hours = &n
+	}
+	if fil != nil {
+		var s string
+		if json.Unmarshal(*fil, &s) == nil {
+			p.Filament = cleanText(s, 24)
+		}
+	}
+	return p
 }
 
 // hexWord keeps a hex word as sent ("0002", "1F"), upper case, at most 16 digits.
@@ -598,9 +656,8 @@ func (l *live) apply(u liveUpdate) {
 			cur.InfoRaw = nu.InfoRaw
 		}
 		cur.hasData = cur.hasData || nu.hasData
-		if nu.DrySetting != nil {
-			ds := *nu.DrySetting
-			cur.DrySetting = &ds
+		if nu.dryKnown {
+			cur.DrySetting = nu.dryPatch.applyTo(cur.DrySetting)
 		}
 		l.units[nu.ID] = cur
 	}
