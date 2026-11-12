@@ -78,6 +78,8 @@ type backend struct {
 	pairCalls    int
 	// monitor, when set, is the monitor block of every sync answer (0.3).
 	monitor string
+	// paused makes every sync answer say the link is paused.
+	paused bool
 	// extra answers routes the base fake does not know (sends, events).
 	// It runs with b.mu held, after the signature check.
 	extra func(w http.ResponseWriter, r *http.Request, body []byte, link *fakeLink) bool
@@ -206,7 +208,7 @@ func (b *backend) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if b.monitor != "" {
 				mon = `,"monitor":` + b.monitor
 			}
-			_, _ = w.Write([]byte(`{"next_sync_s":5,"paused":false,"status":"active","site":{"id":4,"name":"Gilbert"},"company":{"name":"Spoken Parts"},"sends":[],"cancel":[],"commands":[]` + mon + `}`))
+			_, _ = w.Write([]byte(`{"next_sync_s":5,"paused":` + fmt.Sprint(b.paused) + `,"status":"active","site":{"id":4,"name":"Gilbert"},"company":{"name":"Spoken Parts"},"sends":[],"cancel":[],"commands":[]` + mon + `}`))
 		}
 	default:
 		if b.extra != nil && link != nil && b.extra(w, r, body, link) {

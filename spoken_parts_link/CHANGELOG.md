@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.5.0
+
+- Prints labels on a Bluetooth label printer through Home Assistant. You set
+  the printer up in Home Assistant with the Spoken Parts Printers integration
+  (a Nelko P21 for spool labels, for example). When someone prints a label in
+  Spoken Parts, the link picks up the job and hands it to that integration,
+  which sends it to the printer. The link tells Spoken Parts whether it
+  printed or why it did not.
+- New permission: "Home Assistant API". The link needs it to hand label jobs
+  to the Spoken Parts Printers integration on this device and to ask it which
+  label printers are set up. The link only ever calls that integration's two
+  actions (list the printers, print a label) and refuses any other. No new
+  port is opened.
+- Without the integration, the link page says "Install the Spoken Parts
+  Printers integration in Home Assistant to print labels". Spoken Parts is
+  told too.
+- A label job is handed to Home Assistant once. If Home Assistant does not
+  answer, the job is reported as failed and never sent again, so a label is
+  never printed twice. Spoken Parts drops label jobs nobody picked up within
+  3 minutes.
+- The link page has a new "Label printers" section with each printer's state
+  and the last label.
+- Label jobs never go to a 3D printer. The link sends nothing new to your
+  Bambu Lab printers for this.
+- Nothing happens with label printers while Spoken Parts pauses the link.
+
 ## 0.3.1
 
 - Phone alerts now reach a Home Assistant that serves only https on port

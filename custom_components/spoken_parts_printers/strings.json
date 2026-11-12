@@ -1,0 +1,101 @@
+{
+  "config": {
+    "flow_title": "{name}",
+    "step": {
+      "user": {
+        "title": "Add a label printer",
+        "description": "Pick the printer model.",
+        "data": {
+          "driver": "Printer model"
+        }
+      },
+      "printer": {
+        "title": "{model}",
+        "description": "Pair the printer with this Home Assistant host in Bluetooth settings first. The Bluetooth address is on the printer's label or in the phone app, for example AA:BB:CC:DD:EE:FF.",
+        "data": {
+          "address": "Bluetooth address",
+          "name": "Name",
+          "transport": "Connection",
+          "media": "Labels loaded"
+        },
+        "data_description": {
+          "transport": "Bluetooth Classic (serial port) is the most reliable. Bluetooth LE is best effort.",
+          "media": "The label size in the printer right now."
+        }
+      }
+    },
+    "error": {
+      "invalid_address": "Enter the address as six pairs of letters or digits, for example AA:BB:CC:DD:EE:FF.",
+      "bad_transport": "This printer model cannot use that connection.",
+      "bad_media": "This printer model cannot print on that label size."
+    },
+    "abort": {
+      "already_configured": "This printer is already set up.",
+      "no_drivers": "No printer models are available.",
+      "not_supported": "This device is not a supported printer."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Printer options",
+        "data": {
+          "name": "Name",
+          "transport": "Connection",
+          "media": "Labels loaded",
+          "keep_connected": "Stay connected",
+          "rfcomm_channel": "Serial port channel"
+        },
+        "data_description": {
+          "keep_connected": "Keep the Bluetooth link open between labels so printing starts right away. Best for a printer that is plugged in. While connected, the phone app cannot reach the printer.",
+          "rfcomm_channel": "Leave at 1 unless you know your printer uses another channel."
+        }
+      }
+    },
+    "error": {
+      "bad_transport": "This printer model cannot use that connection.",
+      "bad_media": "This printer model cannot print on that label size."
+    },
+    "abort": {
+      "no_drivers": "This printer model is no longer available."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "status": {
+        "name": "Status",
+        "state": {
+          "ready": "Ready",
+          "printing": "Printing",
+          "offline": "Offline",
+          "error": "Error",
+          "waiting": "Waiting"
+        }
+      },
+      "battery": {
+        "name": "Battery"
+      }
+    }
+  },
+  "services": {
+    "list_printers": {
+      "name": "List printers",
+      "description": "Lists the label printers set up in Home Assistant and their state."
+    },
+    "print_raster": {
+      "name": "Print raster label",
+      "description": "Prints a black and white label image on a printer. Answers with the result; it does not fail for printer problems.",
+      "fields": {
+        "printer_id": {"name": "Printer id", "description": "The printer id from list printers."},
+        "job_id": {"name": "Job id", "description": "The Spoken Parts job id."},
+        "driver": {"name": "Driver", "description": "The driver the job was made for, for example nelko.p21."},
+        "document_type": {"name": "Document type", "description": "What the label is, for example spool_label."},
+        "media": {"name": "Media", "description": "The label size the job was made for."},
+        "copies": {"name": "Copies", "description": "How many copies of each page to print."},
+        "pages": {"name": "Pages", "description": "The pages: width and height in dots and the image as base64, one bit per dot, 1 is black."},
+        "format": {"name": "Format", "description": "The job format. Only raster for now."},
+        "id": {"name": "Id", "description": "The job id from the job payload, if sent."}
+      }
+    }
+  }
+}

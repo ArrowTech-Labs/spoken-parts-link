@@ -596,12 +596,28 @@ func (c *Client) do(ctx context.Context, key ed25519.PrivateKey, linkID, method,
 	return c.send(ctx, key, linkID, method, path, "application/json", body, out)
 }
 
+// doLimit is do with a larger answer limit (a claimed label job).
+func (c *Client) doLimit(ctx context.Context, key ed25519.PrivateKey, linkID, method, path string, in, out any, limit int) error {
+	var body []byte
+	if in != nil {
+		var err error
+		if body, err = json.Marshal(in); err != nil {
+			return err
+		}
+	}
+	return c.sendLimit(ctx, key, linkID, method, path, "application/json", body, out, limit)
+}
+
 // doRaw posts body as is with the given content type.
 func (c *Client) doRaw(ctx context.Context, key ed25519.PrivateKey, linkID, path, contentType string, body []byte, out any) error {
 	return c.send(ctx, key, linkID, http.MethodPost, path, contentType, body, out)
 }
 
 func (c *Client) send(ctx context.Context, key ed25519.PrivateKey, linkID, method, path, contentType string, body []byte, out any) error {
+	return c.sendLimit(ctx, key, linkID, method, path, contentType, body, out, maxResponse)
+}
+
+func (c *Client) sendLimit(ctx context.Context, key ed25519.PrivateKey, linkID, method, path, contentType string, body []byte, out any, limit int) error {
 	p, query, _ := strings.Cut(path, "?")
 	u := c.base.JoinPath(Prefix + p)
 	u.RawQuery = query
@@ -624,11 +640,11 @@ func (c *Client) send(ctx context.Context, key ed25519.PrivateKey, linkID, metho
 		return fmt.Errorf("%s %s: %w", method, path, scrubURLError(err))
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponse+1))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, int64(limit)+1))
 	if err != nil {
 		return fmt.Errorf("%s %s: reading answer: %w", method, path, err)
 	}
-	if len(data) > maxResponse {
+	if len(data) > limit {
 		return fmt.Errorf("%s %s: answer too large", method, path)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {

@@ -94,9 +94,28 @@
 </section>
 
 {{if eq .Phase "active"}}
+<section aria-labelledby="labels-h">
+<h2 id="labels-h">Label printers</h2>
+{{with .Labels}}
+{{if not .Checked}}<p class="mut">Checking Home Assistant for label printers.</p>
+{{else if .Present}}
+<p>Through Home Assistant: {{printerCount (len .Printers)}}.</p>
+{{if .Printers}}<ul>
+{{range .Printers}}<li>{{.Name}}: {{labelState .State}}{{if .LastError}} ({{.LastError}}){{end}}{{if .Battery}}, battery {{pct .Battery}} percent{{end}}</li>
+{{end}}</ul>
+{{else}}<p class="mut">Add your label printer in Home Assistant under Settings, then Devices and services, then Spoken Parts Printers.</p>{{end}}
+{{else if eq .Error "not_installed"}}<p class="note">Install the Spoken Parts Printers integration in Home Assistant to print labels.</p>
+{{else if eq .Error "no_token"}}<p class="note warn">This app has no access to Home Assistant, so it can't print labels. Restart the app. The Documentation tab says more.</p>
+{{else}}<p class="note warn">Can't reach Home Assistant for label printers. We keep trying.</p>
+<p class="mut">Install the Spoken Parts Printers integration in Home Assistant to print labels.</p>
+{{end}}
+{{with .LastJob}}<p class="mut">Last label {{if eq .State "printed"}}printed on {{.Printer}} {{ago .At}}.{{else}}failed on {{.Printer}} {{ago .At}}{{if .Message}}: {{.Message}}{{else}}.{{end}}{{end}}</p>{{end}}
+{{end}}
+</section>
+
 <section aria-labelledby="ha-h">
 <h2 id="ha-h">Phone alerts through Home Assistant</h2>
-<p>Optional. When monitoring sees a problem on a printer, the link can also tell your phone through one Home Assistant automation. This works even when the internet is down. The link gets no other access to Home Assistant.</p>
+<p>Optional. When monitoring sees a problem on a printer, the link can also tell your phone through one Home Assistant automation. This works even when the internet is down. Phone alerts use only this one automation.</p>
 {{if not .HAReady}}<p class="mut">Waiting for Spoken Parts. Then you can set this up.</p>
 {{else if .HASet}}
 <p class="ok">On. Your phone gets {{levelText .HAMin}}.</p>

@@ -47,6 +47,10 @@ func customerText(t *testing.T) []string {
 		"spoken_parts_link/CHANGELOG.md",
 		"spoken_parts_link/config.yaml",
 		"spoken_parts_link/translations/en.yaml",
+		"custom_components/spoken_parts_printers/README.md",
+		"custom_components/spoken_parts_printers/PROTOCOL.md",
+		"custom_components/spoken_parts_printers/strings.json",
+		"custom_components/spoken_parts_printers/translations/en.json",
 	}
 	files = append(files, glob(t, "internal/web/templates/*.html")...)
 	files = append(files, glob(t, "internal/web/*.go")...)
@@ -110,7 +114,7 @@ func TestConfigYAML(t *testing.T) {
 	m := topLevel(s)
 	want := map[string]string{
 		"name":           `"Spoken Parts Link"`,
-		"version":        `"0.3.1"`,
+		"version":        `"0.5.0"`,
 		"slug":           "spoken_parts_link",
 		"url":            `"https://github.com/ArrowTech-Labs/spoken-parts-link"`,
 		"image":          `"ghcr.io/arrowtech-labs/spoken-parts-link"`,
@@ -127,6 +131,9 @@ func TestConfigYAML(t *testing.T) {
 		"apparmor":       "true",
 		"watchdog":       `"http://[HOST]:[PORT:8099]/healthz"`,
 		"backup":         "hot",
+		// 0.5: the only Home Assistant permission, for the label printer
+		// integration's two services (internal/haapi). Nothing broader.
+		"homeassistant_api": "true",
 	}
 	for k, v := range want {
 		if m[k] != v {
@@ -138,7 +145,7 @@ func TestConfigYAML(t *testing.T) {
 			t.Errorf("config.yaml lacks %s", k)
 		}
 	}
-	forbidden := []string{"privileged", "full_access", "docker_api", "hassio_api", "homeassistant_api", "auth_api", "ports", "devices", "map", "backup_exclude", "host_pid", "kernel_modules", "uart", "usb", "gpio"}
+	forbidden := []string{"privileged", "full_access", "docker_api", "hassio_api", "hassio_role", "auth_api", "ports", "devices", "map", "backup_exclude", "host_pid", "kernel_modules", "uart", "usb", "gpio"}
 	for _, k := range forbidden {
 		if _, ok := m[k]; ok {
 			t.Errorf("config.yaml must not set %s", k)

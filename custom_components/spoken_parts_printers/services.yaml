@@ -1,0 +1,51 @@
+list_printers:
+
+print_raster:
+  fields:
+    printer_id:
+      required: true
+      example: "nelko.p21:aa:bb:cc:dd:ee:ff"
+      selector:
+        text:
+    job_id:
+      required: true
+      example: "6f1c2a9e-0000-4000-8000-000000000000"
+      selector:
+        text:
+    driver:
+      required: true
+      example: "nelko.p21"
+      selector:
+        text:
+    document_type:
+      required: false
+      example: "spool_label"
+      selector:
+        text:
+    media:
+      required: true
+      example: '{"id": "14x40", "kind": "die_cut", "width_mm": 14, "length_mm": 40}'
+      selector:
+        object:
+    copies:
+      required: false
+      default: 1
+      selector:
+        number:
+          min: 1
+          max: 50
+          mode: box
+    pages:
+      required: true
+      example: '[{"width": 96, "height": 320, "data_b64": "..."}]'
+      selector:
+        object:
+    format:
+      required: false
+      default: "raster"
+      selector:
+        text:
+    id:
+      required: false
+      selector:
+        text:

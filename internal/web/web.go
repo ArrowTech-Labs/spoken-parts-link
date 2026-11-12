@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ArrowTech-Labs/spoken-parts-link/internal/labels"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/logx"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/monitor"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/printers"
@@ -65,6 +66,8 @@ type View struct {
 	HAReady   bool // the encrypted settings are open
 	HASet     bool
 	HAMin     string
+	// 0.5: label printers through Home Assistant (no payloads).
+	Labels labels.Status
 }
 
 // Controller is the app behind the page.
@@ -154,6 +157,13 @@ func New(ctrl Controller, opts Options) (*Server, error) {
 		"canStart":   canStartText,
 		"storage":    storageText,
 		"camText":    camText,
+		"labelState": labelStateText,
+		"printerCount": func(n int) string {
+			if n == 1 {
+				return "1 printer"
+			}
+			return fmt.Sprintf("%d printers", n)
+		},
 		"levelText": func(l string) string {
 			switch l {
 			case "critical":
@@ -585,4 +595,19 @@ func storageText(b *bool) string {
 	default:
 		return "No USB stick. Insert one so prints can be uploaded."
 	}
+}
+
+// labelStateText is a label printer's state in words.
+func labelStateText(s string) string {
+	switch s {
+	case "ready":
+		return "ready"
+	case "printing":
+		return "printing"
+	case "offline":
+		return "can't reach it"
+	case "waiting":
+		return "waiting for its first connection"
+	}
+	return "has a problem"
 }

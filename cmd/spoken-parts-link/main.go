@@ -6,6 +6,10 @@
 // and reports status and progress to Spoken Parts over signed HTTPS
 // requests. It opens no port to the internet and never sends access codes
 // anywhere but to the printer they belong to.
+//
+// From 0.5 it also hands Spoken Parts label jobs to Home Assistant's Spoken
+// Parts Printers integration through the Supervisor (label printers over
+// Bluetooth). That path never touches a 3D printer.
 package main
 
 import (
@@ -23,6 +27,7 @@ import (
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/app"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/camera"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/config"
+	"github.com/ArrowTech-Labs/spoken-parts-link/internal/haapi"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/logx"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/printers"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/privdrop"
@@ -32,7 +37,7 @@ import (
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
-var version = "0.2.2-dev"
+var version = "0.5.0-dev"
 
 // The unprivileged user the link runs as after start.
 const (
@@ -93,6 +98,10 @@ func run() error {
 		// 0.3: camera stills. The link does the RTSPS session itself and
 		// hands ffmpeg only the H.264 key frame on stdin: no URL, no code.
 		Grabber: &camera.Grabber{FFmpeg: camera.DefaultFFmpeg},
+		// 0.5: label printers. The Supervisor sets SUPERVISOR_TOKEN for the
+		// homeassistant_api permission; the app registers it with the log
+		// redactor and only internal/haapi uses it.
+		HAToken: os.Getenv(haapi.TokenEnv),
 	})
 	if err != nil {
 		return err

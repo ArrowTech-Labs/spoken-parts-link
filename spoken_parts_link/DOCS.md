@@ -21,6 +21,9 @@ Raspberry Pi.
   target, lost contact. With the camera on, it takes a camera still every 2
   minutes while a print runs, and one with each problem (see "Watching for
   problems" below).
+- From version 0.5 it prints labels on a Bluetooth label printer that is set
+  up in Home Assistant, such as spool labels on a Nelko P21 (see "Label
+  printers" below).
 
 ## What it does not do
 
@@ -222,8 +225,9 @@ Developer Mode stays off.
 ## Phone alerts through Home Assistant
 
 Optional. The link can also send problems to your phone through one Home
-Assistant automation. This works when the internet is down. The app gets no
-other access to Home Assistant: it can only trigger this one automation.
+Assistant automation. This works when the internet is down. Phone alerts use
+only this one automation. (The app's "Home Assistant API" permission is for
+label printers only, see "Label printers" below.)
 
 1. In Home Assistant, go to Settings, Automations, and create an automation.
 2. Add a trigger: Webhook. Pick a long random webhook ID (at least 24
@@ -268,6 +272,52 @@ other than this device's own, the certificate must be valid.
 The webhook ID is kept encrypted, like the access codes, and is never shown
 again or sent to Spoken Parts. The picture in the notification is a link to
 the still in Spoken Parts that works for 24 hours.
+
+## Label printers
+
+Optional. Spoken Parts can print labels, for example a label for each spool,
+on a Bluetooth label printer near Home Assistant. Home Assistant talks to the
+printer; the link passes the label from Spoken Parts to Home Assistant.
+
+1. Install the Spoken Parts Printers integration in Home Assistant and add
+   your label printer there (Settings, then Devices and services). Its own
+   guide has the steps.
+2. Open the link page. Under "Label printers" it says "Through Home
+   Assistant: 1 printer" with the printer's name and state (ready, printing,
+   can't reach it, has a problem, or waiting for its first connection).
+3. Print a label in Spoken Parts. The link picks it up within a few seconds,
+   hands it to Home Assistant, and tells Spoken Parts whether it printed.
+
+If the page says "Install the Spoken Parts Printers integration in Home
+Assistant to print labels", Home Assistant does not have the integration yet.
+The link checks again every minute.
+
+How it works:
+
+- The link asks Home Assistant which label printers are set up when it
+  starts, every minute and after each label, and tells Spoken Parts.
+- While Home Assistant has a label printer, the link asks Spoken Parts for new
+  labels every 4 seconds. Otherwise once a minute.
+- One label job at a time. A job goes to Home Assistant once. If Home
+  Assistant does not answer within 75 seconds, the job is reported as failed
+  and never sent again, so a label is never printed twice. Print it again in
+  Spoken Parts if it did not come out. Spoken Parts drops a label job nobody
+  picked up within 3 minutes, so a label never prints late.
+- The label is a picture made by Spoken Parts. The link does not look at it,
+  keep it or write it to its log.
+- Nothing happens with label printers while Spoken Parts pauses the link.
+- Labels never go to a 3D printer. The link sends nothing new to your Bambu
+  Lab printers for this.
+
+### Why the app has the "Home Assistant API" permission
+
+From version 0.5 the app asks for Home Assistant API access. Home Assistant
+gives the app a token for this, and the link uses it only to call the two
+actions of the Spoken Parts Printers integration: list the printers and print
+a label. The link refuses any other call, and the token is never written to
+the log or sent to Spoken Parts. The calls go to Home Assistant's Supervisor
+on this device, not over your network or the internet, and no new port is
+opened.
 
 ## Why the app uses the host network
 
