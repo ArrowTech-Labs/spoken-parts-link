@@ -201,11 +201,28 @@ def test_job_timeout(p21):
 
 def test_waiting_for_lock_too_long_is_busy(p21):
     async def go():
-        rt, t = p21_runtime(p21, job_timeout=0.1)
+        rt, t = p21_runtime(p21, job_timeout=5, lock_wait=0.1)
         await rt._lock.acquire()
-        return await rt.print_raster(p21_call())
+        return await rt.print_raster(p21_call()), t
 
-    assert run(go())["code"] == "busy"
+    res, t = run(go())
+    assert res["code"] == "busy"
+    assert not any(w.startswith(b"SIZE") for w in t.writes)
+
+
+def test_still_busy_after_print_is_not_confirmed(p21):
+    rt, t = p21_runtime(p21, P21Printer(statuses=[0x00], after_job=[0x02]))
+    res = run(rt.print_raster(p21_call()))
+    assert res["ok"] is False and res["code"] == "timeout"
+    assert "not confirmed" in res["message"] and res["bytes"] > 0
+
+
+def test_a_job_too_slow_for_the_link_is_refused_before_printing(p21):
+    rt, t = p21_runtime(p21, job_timeout=55.0)
+    t.write_seconds = lambda size: 60.0
+    res = run(rt.print_raster(p21_call()))
+    assert res["ok"] is False and res["code"] == "too_big"
+    assert not any(w.startswith(b"SIZE") for w in t.writes)
 
 
 def test_closes_link_when_not_kept_alive(p21):

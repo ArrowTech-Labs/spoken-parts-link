@@ -113,3 +113,12 @@ def test_connector_error_is_offline(p21):
     with pytest.raises(TransportError) as e:
         run(t.connect())
     assert e.value.code == "offline"
+
+
+def test_ble_write_seconds_counts_the_pacing():
+    from custom_components.spoken_parts_printers.drivers.base import BleParams
+    from custom_components.spoken_parts_printers.transports.ble import BleTransport
+
+    params = BleParams(service_uuid="ff00", write_uuid="ff02", notify_uuid="ff01", chunk_size=20, pacing_s=0.012)
+    t = BleTransport("aa:bb:cc:dd:ee:ff", params, device_getter=lambda: None, connector=None)
+    assert abs(t.write_seconds(7200) - 4.32) < 0.01

@@ -52,6 +52,10 @@ class BleTransport(Transport):
         self._rx = bytearray()
         self._rx_event = asyncio.Event()
 
+    def write_seconds(self, size: int) -> float:
+        p = self.params
+        return (size / max(1, p.chunk_size)) * (p.pacing_s or 0.0)
+
     @property
     def is_connected(self) -> bool:
         return self._client is not None and bool(getattr(self._client, "is_connected", True))

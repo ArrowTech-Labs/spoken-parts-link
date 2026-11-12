@@ -90,6 +90,7 @@ class PrinterRuntime:
         job_timeout: float = 55.0,
         status_timeout: float = 2.0,
         busy_wait: float = 10.0,
+        lock_wait: float = 10.0,
         post_print_wait: float = 20.0,
         poll_interval: float = 0.5,
     ) -> None:
@@ -103,6 +104,7 @@ class PrinterRuntime:
         self.job_timeout = job_timeout
         self.status_timeout = status_timeout
         self.busy_wait = busy_wait
+        self.lock_wait = lock_wait
         self.post_print_wait = post_print_wait
         self.poll_interval = poll_interval
 
@@ -296,19 +298,24 @@ class PrinterRuntime:
         if isinstance(job, dict):
             self._note_print(call.get("job_id"), job)
             return job
-        started = False
+        # The wait for the printer (a status refresh, another job) has its own short
+        # limit; the job's own time starts once it has the printer.
+        try:
+            async with asyncio.timeout(self.lock_wait):
+                await self._lock.acquire()
+        except TimeoutError:
+            result = fail(BUSY, "Another job is still printing on this printer")
+            self._note_print(job.job_id, result)
+            return result
         try:
             async with asyncio.timeout(self.job_timeout):
-                async with self._lock:
-                    started = True
-                    result = await self._print_locked(job)
+                result = await self._print_locked(job)
         except TimeoutError:
-            if not started:
-                result = fail(BUSY, "Another job is still printing on this printer")
-            else:
-                await self.transport.close()
-                result = fail(TIMEOUT, "The printer did not finish the job in time")
-                self._set(ERROR, TIMEOUT, result["message"])
+            await self.transport.close()
+            result = fail(TIMEOUT, "The printer did not finish the job in time. It may have printed part of it.")
+            self._set(ERROR, TIMEOUT, result["message"])
+        finally:
+            self._lock.release()
         self._note_print(job.job_id, result)
         return result
 
@@ -351,6 +358,14 @@ class PrinterRuntime:
             except ValueError as err:
                 raise _JobFailed(fail(BAD_FORMAT, str(err)), READY) from None
 
+            # A slow link (BLE, paced writes) must finish well inside the job's time,
+            # or the job is refused before a single label comes out.
+            if self.transport.write_seconds(len(data)) > self.job_timeout - self.post_print_wait - 5:
+                raise _JobFailed(
+                    fail(TOO_BIG, "This job is too long for this connection. Send fewer labels at once."),
+                    READY,
+                )
+
             try:
                 written = await self.transport.write(data)
             except TransportError as err:
@@ -375,7 +390,12 @@ class PrinterRuntime:
                          "The label was sent but the printer did not confirm it", written),
                     ERROR,
                 ) from None
-            if st is not None and not st.ok and not st.busy:
+            if st is not None and st.busy:
+                raise _JobFailed(
+                    fail(TIMEOUT, "The label was sent but the printer still says busy, so it was not confirmed", written),
+                    ERROR,
+                )
+            if st is not None and not st.ok:
                 raise _JobFailed(fail(st.code, st.message, written), ERROR)
 
             await self._query_battery()

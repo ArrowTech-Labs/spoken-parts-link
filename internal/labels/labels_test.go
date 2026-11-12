@@ -51,6 +51,8 @@ type fakeAPI struct {
 	states    []stateCall
 	claim409  bool
 	stateFail int // the next n state calls answer 503
+	// failFinal: the next n final (printed or failed) state calls answer 503.
+	failFinal int
 }
 
 func (f *fakeAPI) ReportLabelPrinters(_ context.Context, r api.LabelReport) error {
@@ -103,6 +105,10 @@ func (f *fakeAPI) LabelJobState(_ context.Context, id string, req api.LabelState
 	f.states = append(f.states, stateCall{id, req})
 	if f.stateFail > 0 {
 		f.stateFail--
+		return &api.Error{Status: 503}
+	}
+	if f.failFinal > 0 && req.State != "printing" {
+		f.failFinal--
 		return &api.Error{Status: 503}
 	}
 	for _, j := range f.jobs {
@@ -487,22 +493,47 @@ func TestBadFormatIsNotHandedToHA(t *testing.T) {
 	}
 }
 
-func TestStateReportIsRetried(t *testing.T) {
+func TestFinalStateReportIsRetried(t *testing.T) {
 	w := newWorld(t)
 	w.api.add(payload("raster"))
 	w.api.mu.Lock()
-	w.api.stateFail = 2 // "printing" fails twice, then works
+	w.api.failFinal = 2 // "printed" fails twice, then works
 	w.api.mu.Unlock()
 	w.r.SetEnabled(true)
 	waitFor(t, "printed", func() bool {
 		n := w.api.stateNames()
-		return len(n) > 0 && n[len(n)-1] == "printed"
+		return len(n) > 0 && n[len(n)-1] == "printed" && len(n) == 4
 	})
-	if got := strings.Join(w.api.stateNames(), ","); got != "printing,printing,printing,printed" {
+	if got := strings.Join(w.api.stateNames(), ","); got != "printing,printed,printed,printed" {
 		t.Fatalf("states %s", got)
 	}
 	if _, prints := w.ha.counts(); prints != 1 {
 		t.Fatalf("printed %d times", prints)
+	}
+}
+
+func TestUnconfirmedPrintingIsNeverPrinted(t *testing.T) {
+	w := newWorld(t)
+	w.api.add(payload("raster"))
+	w.api.mu.Lock()
+	w.api.stateFail = 1 // Spoken Parts does not accept "printing"
+	w.api.mu.Unlock()
+	w.r.SetEnabled(true)
+	waitFor(t, "failed", func() bool {
+		n := w.api.stateNames()
+		return len(n) > 0 && n[len(n)-1] == "failed"
+	})
+	if got := strings.Join(w.api.stateNames(), ","); got != "printing,failed" {
+		t.Fatalf("states %s", got)
+	}
+	if _, prints := w.ha.counts(); prints != 0 {
+		t.Fatalf("printed %d times after an unconfirmed printing report", prints)
+	}
+	w.api.mu.Lock()
+	last := w.api.states[len(w.api.states)-1].LabelStateRequest
+	w.api.mu.Unlock()
+	if last.Code != "too_late" {
+		t.Fatalf("code %q", last.Code)
 	}
 }
 

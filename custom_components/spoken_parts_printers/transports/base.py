@@ -68,6 +68,10 @@ class Transport(ABC):
     async def read(self, timeout: float) -> bytes:
         """Return whatever bytes arrive within timeout (b"" if none)."""
 
+    def write_seconds(self, size: int) -> float:
+        """At least how long writing size bytes takes (pacing), 0 if not known."""
+        return 0.0
+
     async def drain(self) -> None:
         """Discard bytes that are already waiting (old replies)."""
         while await self.read(0.0):

@@ -64,13 +64,19 @@ type Config struct {
 	StateTries   int           // 4 tries per state report
 	StateBackoff time.Duration // 1 s, doubled per try
 	CallTimeout  time.Duration // 30 s per Spoken Parts call
+	// The "printing" report is tried once, this long; the job goes to Home
+	// Assistant only if Spoken Parts accepted it within PrintWindow of the
+	// claim. Otherwise nothing is printed (never a late label).
+	PrintingTimeout time.Duration // 10 s
+	PrintWindow     time.Duration // 20 s
 }
 
 // Failure codes of the contract.
 var failCodes = map[string]bool{
 	"offline": true, "busy": true, "no_media": true, "cover_open": true, "bad_format": true,
 	"too_big": true, "write_failed": true, "timeout": true, "no_integration": true,
-	"unknown_printer": true, "printer_error": true,
+	"unknown_printer": true, "printer_error": true, "wrong_media": true, "too_late": true,
+	"link_paused": true,
 }
 
 // Printer states of the contract.
@@ -134,6 +140,8 @@ func New(cfg Config) *Runner {
 		}
 	}
 	def(&cfg.ReportEvery, 60*time.Second)
+	def(&cfg.PrintingTimeout, 10*time.Second)
+	def(&cfg.PrintWindow, 20*time.Second)
 	def(&cfg.PollFast, 4*time.Second)
 	def(&cfg.PollSlow, 60*time.Second)
 	def(&cfg.ListTimeout, 10*time.Second)
@@ -446,10 +454,21 @@ func (r *Runner) run(ctx context.Context, gen uint64, id string) bool {
 		r.finish(ctx, gen, id, name, api.LabelStateRequest{State: "failed", Code: "bad_format", Message: "The link can only print raster labels."})
 		return true
 	}
-	r.state(ctx, id, api.LabelStateRequest{State: "printing"})
+	// Say "printing" once, quickly. Only if Spoken Parts accepts it, soon after
+	// the claim, does the job go to Home Assistant: a job the page has already
+	// given up on is never printed late.
+	claimed := r.cfg.Now()
+	sctx, scancel := context.WithTimeout(ctx, r.cfg.PrintingTimeout)
+	err = r.cfg.API.LabelJobState(sctx, id, api.LabelStateRequest{State: "printing"})
+	scancel()
+	if err != nil || r.cfg.Now().Sub(claimed) > r.cfg.PrintWindow {
+		r.cfg.Log.Info("label job not confirmed in time, not printed", "job", id[:8], "err", err)
+		r.finish(ctx, gen, id, name, api.LabelStateRequest{State: "failed", Code: "too_late", Message: "Spoken Parts did not confirm it in time. Nothing was sent to the printer."})
+		return true
+	}
 	if !r.current(gen) {
 		// Paused or removed between the claim and the print: do not print.
-		r.state(ctx, id, api.LabelStateRequest{State: "failed", Code: "printer_error", Message: "The link was paused before printing."})
+		r.finish(ctx, gen, id, name, api.LabelStateRequest{State: "failed", Code: "link_paused", Message: "The link was paused before printing. Nothing was printed."})
 		return true
 	}
 
