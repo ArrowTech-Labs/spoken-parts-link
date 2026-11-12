@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ArrowTech-Labs/spoken-parts-link/internal/labels"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/logx"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/monitor"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/printers"
@@ -451,5 +452,62 @@ func TestHomeAssistantForms(t *testing.T) {
 	do(h, "POST", "/ha/remove", ingress, url.Values{"csrf": {tok}}, nil)
 	if !f.haTested || f.haLevel != "info" || !f.haGone {
 		t.Fatalf("%+v", f)
+	}
+}
+
+func TestLabelPrintersSection(t *testing.T) {
+	page := func(v View) string {
+		_, _, h, _ := newServer(t, v)
+		w := do(h, "GET", "/", ingress, nil, nil)
+		if csp := w.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "script-src 'none'") {
+			t.Fatalf("CSP %q", csp)
+		}
+		return html.UnescapeString(w.Body.String())
+	}
+	v := activeView
+	if p := page(v); !strings.Contains(p, "Label printers") || !strings.Contains(p, "Checking Home Assistant for label printers.") {
+		t.Fatal("unchecked state missing")
+	}
+	bat := 80
+	v.Labels = labels.Status{Checked: true, Present: true, Version: "0.1.0", Printers: []labels.PrinterStatus{
+		{Name: "Label maker", State: "ready", Battery: &bat},
+		{Name: "Shipping <b>", State: "offline", LastError: "Bluetooth off"},
+	}, LastJob: &labels.JobResult{At: time.Now().Add(-2 * time.Minute), Printer: "Label maker", State: "printed"}}
+	p := page(v)
+	for _, want := range []string{"Through Home Assistant: 2 printers.", "Label maker: ready, battery 80 percent", "Shipping <b>: can't reach it (Bluetooth off)", "Last label printed on Label maker 2 minutes ago."} {
+		if !strings.Contains(p, want) {
+			t.Errorf("page lacks %q", want)
+		}
+	}
+	_, _, h, _ := newServer(t, v)
+	if raw := do(h, "GET", "/", ingress, nil, nil).Body.String(); strings.Contains(raw, "Shipping <b>") || strings.Contains(raw, "<script") {
+		t.Fatal("printer name not escaped")
+	}
+	v.Labels = labels.Status{Checked: true, Present: true, Printers: []labels.PrinterStatus{{Name: "One", State: "waiting"}},
+		LastJob: &labels.JobResult{At: time.Now(), Printer: "One", State: "failed", Code: "offline", Message: "Could not reach the printer over Bluetooth"}}
+	p = page(v)
+	if !strings.Contains(p, "Through Home Assistant: 1 printer.") || !strings.Contains(p, "One: waiting for its first connection") ||
+		!strings.Contains(p, "Last label failed on One just now: Could not reach the printer over Bluetooth") {
+		t.Errorf("one printer page wrong")
+	}
+	v.Labels = labels.Status{Checked: true, Present: true}
+	if p := page(v); !strings.Contains(p, "Through Home Assistant: 0 printers.") || !strings.Contains(p, "Add your label printer in Home Assistant") {
+		t.Error("no printers text")
+	}
+	v.Labels = labels.Status{Checked: true, Error: "not_installed"}
+	if p := page(v); !strings.Contains(p, "Install the Spoken Parts Printers integration in Home Assistant to print labels") {
+		t.Error("install text missing")
+	}
+	v.Labels = labels.Status{Checked: true, Error: "ha_unreachable"}
+	if p := page(v); !strings.Contains(p, "Can't reach Home Assistant for label printers.") {
+		t.Error("unreachable text missing")
+	}
+	v.Labels = labels.Status{Checked: true, Error: "no_token"}
+	if p := page(v); !strings.Contains(p, "no access to Home Assistant") {
+		t.Error("no token text missing")
+	}
+	v.Phase = PhaseUnpaired
+	if p := page(v); strings.Contains(p, "Label printers") {
+		t.Error("label printers shown before pairing")
 	}
 }

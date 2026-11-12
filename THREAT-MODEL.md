@@ -1,8 +1,9 @@
 # Threat model: Spoken Parts Link
 
-This covers the link program in this repository (version 0.3: status,
-uploading the prints Spoken Parts sends, and watching printers with camera
-stills), its
+This covers the link program in this repository (version 0.5: status,
+uploading the prints Spoken Parts sends, watching printers with camera
+stills, and handing label jobs to Home Assistant for Bluetooth label
+printers), its
 pairing with Spoken Parts, the data it keeps on the device, and how release
 images are built. It is written for customers, auditors and contributors.
 
@@ -25,6 +26,10 @@ images are built. It is written for customers, auditors and contributors.
 6. **The release pipeline.** Whatever it ships runs on customer networks.
 7. **Print files.** The sliced files Spoken Parts sends. They are customers'
    parts, so they are kept only while they are delivered.
+8. **The Supervisor token (0.5).** `SUPERVISOR_TOKEN`, which the Supervisor
+   gives the app for its `homeassistant_api` permission. It can call Home
+   Assistant's whole REST API (any action, any state), so it matters as much
+   as the Home Assistant host itself.
 
 ## 2. Who might attack
 
@@ -81,7 +86,7 @@ images are built. It is written for customers, auditors and contributors.
 
 | Threat | Mitigation |
 |---|---|
-| Other apps read `/data` | Supervisor keeps each app's data separate. The app asks for no Supervisor or Home Assistant API access, no privileged capabilities and no device access. A custom AppArmor profile limits files, capabilities and sockets. |
+| Other apps read `/data` | Supervisor keeps each app's data separate. The app asks for no Supervisor API access, no privileged capabilities and no device access. Its one Home Assistant permission, `homeassistant_api` (0.5), is for label printers (section 4.10). A custom AppArmor profile limits files, capabilities and sockets. |
 | Process compromise | The program starts as root only to fix ownership of its folders, then switches to uid 65532 for good before it opens any socket or reads any network input. The image has no shell or other programs. |
 | Home Assistant admin users | They can open the link page. Access code fields are write only: the page never shows a saved code. |
 | Cross site requests | Every form needs a CSRF token. The page has no scripts, a strict content security policy and only same origin framing. |
@@ -164,11 +169,30 @@ on the printer: the link deletes only files it uploaded itself.
 | A fake camera on the LAN | The camera connection must pass the certificate check before the code is sent, and is only used while the checked MQTT session to the same address is up. |
 | Malicious camera data | The RTSP client caps header, body, packet, NAL and frame sizes and the whole grab has a 15 second limit; ffmpeg has its own 15 second limit and its output is capped at 2 MB. The depacketizer is fuzz tested. ffmpeg runs under the app's AppArmor profile (`ix`), which allows no other program and no shell is in the image. |
 | Privacy (people in the room) | Stills only while printing, with problems and at the end; none while idle. Monitoring and the camera are off until an owner turns them on in Spoken Parts. Metadata (EXIF and comments) is stripped. |
-| Phone alert webhook | The webhook id is a secret: stored in its own AES-256-GCM file, keyed like the access codes, registered with the log redactor, never shown again or sent to Spoken Parts. The link posts only to Home Assistant on this host (or the address in the owner's `ha_url` option), never through a proxy. On https to 127.0.0.0/8 or ::1 the certificate is not checked, because Home Assistant's certificate never names that address; the client that skips the check dials only loopback addresses. Every other https address is checked against the system roots. Errors and logs name only the scheme, host and port. The app has no `homeassistant_api` or `hassio_api` permission. |
+| Phone alert webhook | The webhook id is a secret: stored in its own AES-256-GCM file, keyed like the access codes, registered with the log redactor, never shown again or sent to Spoken Parts. The link posts only to Home Assistant on this host (or the address in the owner's `ha_url` option), never through a proxy. On https to 127.0.0.0/8 or ::1 the certificate is not checked, because Home Assistant's certificate never names that address; the client that skips the check dials only loopback addresses. Every other https address is checked against the system roots. Errors and logs name only the scheme, host and port. The webhook needs no Home Assistant permission; the `homeassistant_api` permission added in 0.5 is used only for label printers (section 4.10). |
 | Alerts that act on printers | None. The monitor never sends a printer command; the MQTT allow list is unchanged (pushall, and project_file behind the off flag). |
 | Signed still links | Stills attached to alerts can come with a 24 hour signed link for the phone notification. The link registers it with the log redactor. |
 
-### 4.10 Supply chain (B4)
+### 4.10 Label printers through Home Assistant (B1, B3)
+
+New trust edge in 0.5: link, then the Supervisor (`http://supervisor/core/api`
+on the hassio network), then a Home Assistant core action of the Spoken Parts
+Printers integration, which talks to the label printer over Bluetooth. No new
+inbound port: every call is made by the link.
+
+| Threat | Mitigation |
+|---|---|
+| The Supervisor token is misused | The token can call any Home Assistant action and read every state. The link sends it only in the Authorization header to the Supervisor, never through a proxy, never on a redirect. `internal/haapi` refuses any call but `spoken_parts_printers.list_printers` and `spoken_parts_printers.print_raster` before a request is made, and a repository test fails if any other code reads the token or names the Supervisor's address. The token is registered with the log redactor and no error includes it. ffmpeg runs with an empty environment, so it never gets the token. |
+| Process compromise | Code running as the link could use the token for anything Home Assistant allows. The same protections as before apply (uid 65532, no shell, AppArmor). This is the main new risk (section 5). |
+| A compromised backend prints something | It could queue label jobs for this link's label printers: it can waste labels. A job names a printer the link reported and goes only to the integration's `print_raster`, which only prints. It cannot reach any other Home Assistant action or any 3D printer. |
+| A label is printed twice | A job is claimed once (the backend answers 409 to a second claim) and handed to Home Assistant at most once: the link remembers each job it claimed and never hands it on again, even when Home Assistant does not answer (the job is reported as failed with `timeout`). Only the state report is retried. |
+| A label is printed late | Spoken Parts expires queued jobs 3 minutes after they were made and refuses to hand out an expired job. |
+| Payload abuse | The label raster (`pages[].data_b64`) is opaque to the link: it is not decoded, stored or logged, only passed to Home Assistant as received. A claimed job answer is capped at 2 MB. Home Assistant's answers are capped at 1 MB, and printer names, states and messages are cut to the backend's sizes before they are reported or shown (the page escapes them; it has no scripts). |
+| Integration missing or Home Assistant down | The link still reports, with `integration.present=false` and a short code (`not_installed`, `ha_unreachable`, `no_token`, `http_<n>`), so Spoken Parts can tell the owner. A job that arrives meanwhile fails with `no_integration` or `timeout`. |
+| Paused or removed link | Nothing is reported, polled or printed while Spoken Parts pauses the link, and the runner stops and forgets its status when the link is removed. |
+| 3D printers | Label jobs never use MQTT, FTPS or a Bambu printer. A repository test fails if the label or Supervisor code imports the printer, MQTT, FTPS, sends or camera packages. The MQTT allow list is unchanged. |
+
+### 4.11 Supply chain (B4)
 
 | Threat | Mitigation |
 |---|---|
@@ -203,3 +227,9 @@ on the printer: the link deletes only files it uploaded itself.
    no network use of its own, but it can read the app's data folder.
 10. **Host compromise.** An app with full access, or a compromise of the Home
    Assistant host, can read everything on that host, including this app's data.
+11. **The Supervisor token (0.5).** If the link process itself is taken over,
+   the attacker has the app's Home Assistant token and can do whatever Home
+   Assistant's REST API allows, not just print labels. The allow list in
+   `internal/haapi` limits what the link's own code does, not what a
+   compromised process can do. Owners who do not use label printers still
+   grant this permission when they install 0.5.

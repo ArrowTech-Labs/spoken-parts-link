@@ -1,0 +1,19 @@
+{
+  "domain": "spoken_parts_printers",
+  "name": "Spoken Parts Printers",
+  "bluetooth": [
+    {
+      "local_name": "P21*",
+      "connectable": true
+    }
+  ],
+  "codeowners": ["@mrmarcsmith"],
+  "config_flow": true,
+  "dependencies": ["bluetooth_adapters"],
+  "documentation": "https://github.com/ArrowTech-Labs/spoken-parts-link/tree/main/custom_components/spoken_parts_printers",
+  "integration_type": "device",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/ArrowTech-Labs/spoken-parts-link/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}

@@ -8,6 +8,8 @@ status in Spoken Parts.
 - Uploads the prints Spoken Parts sends to the printer's USB stick. Someone
   then taps the file on the printer screen and presses Print.
 - Follows each print to the end and tells Spoken Parts how it goes.
+- Prints labels on a Bluetooth label printer through Home Assistant's Spoken
+  Parts Printers integration (optional).
 - Keeps the access codes on this device, encrypted. They are never sent to
   Spoken Parts.
 - Opens no port to the internet.

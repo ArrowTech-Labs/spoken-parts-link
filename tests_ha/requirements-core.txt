@@ -1,0 +1,2 @@
+# The printer core tests need only pytest.
+pytest==9.0.3

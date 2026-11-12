@@ -17,6 +17,12 @@ profile spoken_parts_link flags=(attach_disconnected,mediate_deleted) {
   # RTSPS camera (port 322) of printers, Home Assistant's webhook on this
   # host (127.0.0.1:8123, phone alerts), the discovery listener
   # on UDP 2021 and the ingress page. Go lists interfaces over netlink.
+  # 0.5: label printers go through the Supervisor (http://supervisor, plain
+  # TCP on the hassio network, named in /etc/hosts below). That is the same
+  # "network inet stream" rule: no new rule. The SUPERVISOR_TOKEN comes from
+  # the environment the process starts with, which is not a file read. The
+  # app never talks Bluetooth itself (Home Assistant does), so it needs no
+  # bluetooth socket, D-Bus or device access.
   network inet stream,
   network inet dgram,
   network inet6 stream,

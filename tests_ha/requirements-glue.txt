@@ -1,0 +1,15 @@
+# Home Assistant glue tests, pinned to Home Assistant 2026.7.1 (the target).
+pytest-homeassistant-custom-component==0.13.345
+# The integration depends on bluetooth_adapters, so the tests set up HA's
+# bluetooth, usb and esphome code. These are those components' requirements
+# from their manifests in Home Assistant 2026.7.1.
+aiousbwatcher==1.1.2
+serialx==1.8.2
+bleak==3.0.2
+bleak-retry-connector==4.6.1
+bluetooth-adapters==2.4.0
+bluetooth-auto-recovery==1.6.4
+bluetooth-data-tools==1.29.18
+dbus-fast==5.0.22
+habluetooth==6.26.2
+aioesphomeapi==45.3.1

@@ -101,3 +101,41 @@ jobs:
           platforms: linux/amd64,linux/arm64
           build-args: VERSION=ci
           push: false
+
+  ha-integration:
+    name: Home Assistant integration (Python)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14"
+      - name: No em or en dashes in integration text
+        env:
+          LC_ALL: C.UTF-8
+        run: |
+          if grep -rnP '[\x{2013}\x{2014}]' custom_components hacs.json; then
+            echo "::error::Customer text must not use em or en dashes."
+            exit 1
+          fi
+      - name: JSON files parse
+        run: |
+          for f in hacs.json custom_components/spoken_parts_printers/manifest.json \
+                   custom_components/spoken_parts_printers/strings.json \
+                   custom_components/spoken_parts_printers/translations/en.json; do
+            python -m json.tool "$f" > /dev/null
+          done
+          cmp custom_components/spoken_parts_printers/strings.json \
+              custom_components/spoken_parts_printers/translations/en.json
+      - name: Core tests (no Home Assistant installed)
+        run: |
+          python -m venv "$RUNNER_TEMP/core"
+          "$RUNNER_TEMP/core/bin/pip" install -r tests_ha/requirements-core.txt
+          "$RUNNER_TEMP/core/bin/python" -m pytest tests_ha -q
+      - name: Home Assistant glue tests (Home Assistant 2026.7.1)
+        run: |
+          python -m venv "$RUNNER_TEMP/ha"
+          "$RUNNER_TEMP/ha/bin/pip" install -r tests_ha/requirements-glue.txt
+          "$RUNNER_TEMP/ha/bin/python" -m pytest tests_ha/glue -q

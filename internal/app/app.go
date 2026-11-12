@@ -18,8 +18,10 @@ import (
 
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/api"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/fsutil"
+	"github.com/ArrowTech-Labs/spoken-parts-link/internal/haapi"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/hanotify"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/identity"
+	"github.com/ArrowTech-Labs/spoken-parts-link/internal/labels"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/logx"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/monitor"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/printers"
@@ -71,6 +73,14 @@ type Config struct {
 	CameraPort  int
 	HAURL       string        // ha_url option; "" tries http, then https, on 127.0.0.1:8123
 	MonitorTick time.Duration // 30 s
+
+	// 0.5 label printers through Home Assistant's Spoken Parts Printers
+	// integration, reached through the Supervisor. HAToken is
+	// SUPERVISOR_TOKEN (never logged); HABase is haapi.DefaultBase unless a
+	// test sets it. Labels: only the timings are used.
+	HABase  string
+	HAToken string
+	Labels  labels.Config
 }
 
 // FrameGrabber gets one JPEG over an open, checked camera connection.
@@ -87,6 +97,7 @@ type App struct {
 	codes    *store.Codes
 	printers *printers.Manager
 	sends    *sends.Runner
+	labels   *labels.Runner
 	monitor  *monitor.Runner
 	ha       *hanotify.Notifier
 	started  time.Time
@@ -202,6 +213,17 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	if a.sends, err = sends.New(sc); err != nil {
 		return nil, err
 	}
+	if cfg.HAToken != "" {
+		a.red.Add(cfg.HAToken)
+	}
+	lc := cfg.Labels
+	lc.API = linkAPI{a}
+	lc.HA = haapi.New(or(cfg.HABase, haapi.DefaultBase), cfg.HAToken)
+	lc.Log = cfg.Log
+	if lc.Now == nil {
+		lc.Now = cfg.Now
+	}
+	a.labels = labels.New(lc)
 	if a.st.Status == store.StatusPending && cfg.Now().Sub(a.st.PendingSince) > cfg.PendingTimeout {
 		a.mu.Lock()
 		a.resetLocked(web.MsgTimedOut, true)
@@ -286,6 +308,9 @@ func (a *App) Run(ctx context.Context) {
 	mdone := make(chan struct{})
 	go func() { a.monitor.Run(ctx); close(mdone) }()
 	defer func() { <-mdone }()
+	ldone := make(chan struct{})
+	go func() { a.labels.Run(ctx); close(ldone) }()
+	defer func() { <-ldone }()
 	for ctx.Err() == nil {
 		s := a.snap()
 		switch s.status {
@@ -396,6 +421,7 @@ func (a *App) stepActive(ctx context.Context, s snapshot) {
 		a.st.Status = store.StatusPending
 		a.st.PendingSince = a.cfg.Now().UTC()
 		a.saveStateLocked()
+		a.labels.SetEnabled(false)
 	case api.HasCode(err, api.CodeUnknownLink):
 		if !a.unknownLinkLocked() {
 			wait = a.cfg.UnknownRetry
@@ -429,6 +455,10 @@ func (a *App) stepActive(ctx context.Context, s snapshot) {
 		if ms, ok := monitor.ParseSettings(resp.Monitor); ok {
 			a.monitor.SetSettings(ms)
 		}
+		// Label printers run once a sync said the link is active, and stop
+		// while Spoken Parts pauses the link.
+		a.labels.SetPaused(resp.Paused)
+		a.labels.SetEnabled(true)
 		wait = a.nextSync(resp.NextSyncS)
 	}
 	a.mu.Unlock()
@@ -464,6 +494,7 @@ func (a *App) loadDataKey(ctx context.Context, s snapshot) bool {
 		a.st.Status = store.StatusPending
 		a.st.PendingSince = a.cfg.Now().UTC()
 		a.saveStateLocked()
+		a.labels.SetEnabled(false)
 		return false
 	case api.HasCode(err, api.CodeUnknownLink):
 		if !a.unknownLinkLocked() {
@@ -676,6 +707,42 @@ func (l linkAPI) Alerts(ctx context.Context, serial string, b api.AlertBatch) er
 	return l.a.api.Alerts(ctx, s.key, s.linkID, serial, b)
 }
 
+// ReportLabelPrinters implements labels.API.
+func (l linkAPI) ReportLabelPrinters(ctx context.Context, r api.LabelReport) error {
+	s, err := l.active()
+	if err != nil {
+		return err
+	}
+	return l.a.api.ReportLabelPrinters(ctx, s.key, s.linkID, r)
+}
+
+// ListLabelJobs implements labels.API.
+func (l linkAPI) ListLabelJobs(ctx context.Context) ([]api.LabelJobRef, error) {
+	s, err := l.active()
+	if err != nil {
+		return nil, err
+	}
+	return l.a.api.ListLabelJobs(ctx, s.key, s.linkID)
+}
+
+// ClaimLabelJob implements labels.API.
+func (l linkAPI) ClaimLabelJob(ctx context.Context, id string) (*api.LabelJob, error) {
+	s, err := l.active()
+	if err != nil {
+		return nil, err
+	}
+	return l.a.api.ClaimLabelJob(ctx, s.key, s.linkID, id)
+}
+
+// LabelJobState implements labels.API.
+func (l linkAPI) LabelJobState(ctx context.Context, id string, req api.LabelStateRequest) error {
+	s, err := l.active()
+	if err != nil {
+		return err
+	}
+	return l.a.api.LabelJobState(ctx, s.key, s.linkID, id, req)
+}
+
 // monitorSource gives the monitor the printers' reports and camera frames.
 type monitorSource struct{ a *App }
 
@@ -715,6 +782,7 @@ func (a *App) resetLocked(notice web.Msg, wipe bool) {
 	// Sends and their files (the spool) go with the link, and so do the
 	// monitor state and the camera frames.
 	a.sends.Reset()
+	a.labels.Reset()
 	a.monitor.Reset()
 	a.ha.Lock()
 	if wipe {
@@ -786,6 +854,7 @@ func (a *App) View() web.View {
 	v.HAReady = v.CodesReady
 	v.HASet = a.ha.Configured()
 	v.HAMin = string(a.ha.MinSeverity())
+	v.Labels = a.labels.Status()
 	v.Sends = map[string]sends.Status{}
 	for _, p := range v.Printers {
 		if st, ok := a.sends.Status(p.Serial); ok {
@@ -1016,4 +1085,11 @@ func (a *App) TestHA(ctx context.Context) error {
 		return web.MsgHAFailed
 	}
 	return nil
+}
+
+func or(v, d string) string {
+	if v == "" {
+		return d
+	}
+	return v
 }

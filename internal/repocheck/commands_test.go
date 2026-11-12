@@ -84,3 +84,62 @@ func TestPrinterCommandAllowList(t *testing.T) {
 		})
 	}
 }
+
+// TestHomeAssistantAPIUse (0.5): the homeassistant_api permission gives the
+// app a token that can do anything Home Assistant's REST API can. Only
+// internal/haapi may use it, only for the two Spoken Parts Printers
+// services, and the label printer code never touches a 3D printer path.
+func TestHomeAssistantAPIUse(t *testing.T) {
+	src := read(t, "internal/haapi/haapi.go")
+	for _, want := range []string{
+		"var AllowedServices = [...]string{\"list_printers\", \"print_raster\"}\n",
+		"const Domain = \"spoken_parts_printers\"\n",
+		"const DefaultBase = \"http://supervisor/core/api\"\n",
+		"if !allowed(domain, service) {\n\t\treturn nil, ErrNotAllowed\n\t}",
+	} {
+		if !strings.Contains(src, want) {
+			t.Errorf("internal/haapi/haapi.go lacks %q", want)
+		}
+	}
+	var files []string
+	_ = filepath.WalkDir(filepath.Join(root, "internal"), func(p string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && strings.HasSuffix(p, ".go") && !strings.HasSuffix(p, "_test.go") {
+			files = append(files, p)
+		}
+		return nil
+	})
+	files = append(files, filepath.Join(root, "cmd/spoken-parts-link/main.go"))
+	fset := token.NewFileSet()
+	for _, p := range files {
+		f, err := parser.ParseFile(fset, p, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rel, _ := filepath.Rel(root, p)
+		ast.Inspect(f, func(n ast.Node) bool {
+			lit, ok := n.(*ast.BasicLit)
+			if !ok || lit.Kind != token.STRING {
+				return true
+			}
+			v, err := strconv.Unquote(lit.Value)
+			if err != nil {
+				return true
+			}
+			if rel != "internal/haapi/haapi.go" && (strings.Contains(v, "SUPERVISOR_TOKEN") || strings.Contains(strings.ToLower(v), "supervisor/") ||
+				strings.Contains(v, "/services/") || strings.Contains(v, "/core/api")) {
+				t.Errorf("%s: %q; only internal/haapi talks to the Supervisor", rel, v)
+			}
+			return true
+		})
+		if strings.HasPrefix(rel, "internal/labels/") || strings.HasPrefix(rel, "internal/haapi/") {
+			for _, imp := range f.Imports {
+				path, _ := strconv.Unquote(imp.Path.Value)
+				for _, bad := range []string{"/internal/mqtt", "/internal/ftps", "/internal/printers", "/internal/sends", "/internal/camera", "/internal/rtsp"} {
+					if strings.HasSuffix(path, bad) {
+						t.Errorf("%s imports %s: label jobs never touch a 3D printer", rel, path)
+					}
+				}
+			}
+		}
+	}
+}

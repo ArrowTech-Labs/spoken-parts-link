@@ -71,6 +71,18 @@ is also the app's Documentation tab in Home Assistant.
   Spoken Parts over the signed API. Optional phone alerts go to one Home
   Assistant webhook automation on the same host (or the `ha_url` option);
   its id is stored encrypted.
+- **Label printers (0.5).** Label printers are set up in Home Assistant's
+  Spoken Parts Printers integration, which talks to them over Bluetooth. The
+  link (`internal/labels`) reports that integration's printers to Spoken
+  Parts, polls the signed API for label jobs, claims one at a time and hands
+  exactly the claimed fields to the integration's `print_raster` action
+  through the Supervisor (`internal/haapi`, the app's `homeassistant_api`
+  permission). It reports printed or failed, and never hands a job to Home
+  Assistant twice. The Supervisor client calls only `list_printers` and
+  `print_raster` of `spoken_parts_printers`, and a repository test fails if
+  any other code uses the Supervisor or its token. The label raster is opaque
+  to the link and never logged. Label jobs never touch MQTT, FTPS or a 3D
+  printer.
 - **The link page** only answers Home Assistant's ingress proxy. It has no
   scripts, a strict content security policy and a CSRF token on every form.
 
@@ -115,7 +127,8 @@ spoken_parts_link/           the app: config.yaml, Dockerfile, AppArmor profile,
 cmd/spoken-parts-link/       main program
 internal/                    identity, signing, API client, encrypted store,
                              discovery, MQTT client, printers, FTPS client,
-                             3MF check, sends, web page, app
+                             3MF check, sends, label jobs, Supervisor
+                             client, web page, app
 internal/printers/ca/        public Bambu Lab CA certificates (see SOURCES.md)
 ```
 
