@@ -11,6 +11,12 @@ Raspberry Pi.
 - It reads each printer's status: idle or printing, percent done, layers, time
   left, errors, the filament in each AMS slot and the nozzle sizes. It uses the
   printer's access code for this.
+- From version 0.6 it also passes on what each AMS reports about drying:
+  humidity, temperature, minutes of drying left, why drying can't run, the dry
+  the printer was asked to run (temperature, hours, material), the AMS's raw
+  status word, and which slots have filament in the feeder. Spoken Parts uses
+  them to tell when a dry starts and finishes. The link only reads these; it
+  never starts, stops or changes a dry.
 - It tells Spoken Parts what it sees, about every 30 seconds (every 5 seconds
   while a print is on its way).
 - It uploads the prints Spoken Parts sends to the printer's USB stick, and

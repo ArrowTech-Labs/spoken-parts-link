@@ -35,6 +35,26 @@ type AmsUnit struct {
 	DryTime     *int     // minutes of drying left
 	DrySfReason []string // why drying can't run (power, filament at the outlet)
 	sfKnown     bool
+	// ATS-SP-AMS-DRY-BUILD-1: read-only extras, sent as the printer reports them.
+	// InfoRaw is the unit's "info" hex word (its drying status bits are decoded by
+	// Spoken Parts once observed). DrySetting is the dry the printer was asked to
+	// run (nil when the firmware doesn't send it). TrayExist is the printer's
+	// tray_exist_bits hex word (the AMS feeder sensors, one word for all units).
+	InfoRaw    string
+	DrySetting *DrySetting
+	TrayExist  string
+	// hasData: the unit reported humidity, temperature or drying at least once.
+	// A unit with only its info word is never synced (an all-empty humidity
+	// sample would mean nothing to Spoken Parts).
+	hasData bool
+}
+
+// DrySetting is the AMS dry the printer was asked to run. Each field is nil or
+// "" when the firmware doesn't say.
+type DrySetting struct {
+	TempC    *int   // dry_temperature, C
+	Hours    *int   // dry_duration, hours
+	Filament string // dry_filament, a material name such as "PLA"
 }
 
 // Nozzle is one nozzle as the printer last reported it.
@@ -84,6 +104,7 @@ type liveUpdate struct {
 	nozzles    []Nozzle
 	command    *CommandResult
 	units      []AmsUnit
+	trayExist  *string
 }
 
 type trayUpdate struct {
@@ -127,8 +148,14 @@ func parseLive(payload []byte) (liveUpdate, bool) {
 					Temp        *json.RawMessage   `json:"temp"`
 					DryTime     *json.RawMessage   `json:"dry_time"`
 					DrySfReason *[]json.RawMessage `json:"dry_sf_reason"`
+					DrySetting  *struct {
+						Temp     *json.RawMessage `json:"dry_temperature"`
+						Duration *json.RawMessage `json:"dry_duration"`
+						Filament *json.RawMessage `json:"dry_filament"`
+					} `json:"dry_setting"`
 				} `json:"ams"`
-				TrayNow *json.RawMessage `json:"tray_now"`
+				TrayNow       *json.RawMessage `json:"tray_now"`
+				TrayExistBits *json.RawMessage `json:"tray_exist_bits"`
 			} `json:"ams"`
 			Device *struct {
 				Nozzle *struct {
@@ -220,6 +247,14 @@ func parseLive(payload []byte) (liveUpdate, bool) {
 		if n, ok := flexInt(p.AMS.TrayNow); ok && n >= 0 && n <= 255 {
 			u.trayNow = &n
 		}
+		if p.AMS.TrayExistBits != nil {
+			var s string
+			if json.Unmarshal(*p.AMS.TrayExistBits, &s) == nil {
+				if h := hexWord(s); h != "" {
+					u.trayExist = &h
+				}
+			}
+		}
 		for _, unit := range p.AMS.AMS {
 			id, ok := flexInt((*json.RawMessage)(&unit.ID))
 			if !ok || id < 0 || id > 255 {
@@ -229,7 +264,13 @@ func parseLive(payload []byte) (liveUpdate, bool) {
 			if info, err := strconv.ParseUint(strings.TrimSpace(unit.Info), 16, 32); err == nil {
 				feeds = int(info>>8) & 0xF
 			}
-			if au, ok := parseUnit(id, unit.Humidity, unit.HumidityRaw, unit.Temp, unit.DryTime, unit.DrySfReason); ok {
+			au, _ := parseUnit(id, unit.Humidity, unit.HumidityRaw, unit.Temp, unit.DryTime, unit.DrySfReason)
+			au.InfoRaw = hexWord(unit.Info)
+			if ds := unit.DrySetting; ds != nil {
+				au.DrySetting = parseDrySetting(ds.Temp, ds.Duration, ds.Filament)
+			}
+			au.hasData = unitHasData(au)
+			if au.hasData || au.InfoRaw != "" {
 				u.units = append(u.units, au)
 			}
 			for _, tr := range unit.Tray {
@@ -325,6 +366,48 @@ func parseUnit(id int, humidity, raw, temp, dry *json.RawMessage, reasons *[]jso
 	return u, ok
 }
 
+// unitHasData is true when a unit report carries anything worth syncing.
+func unitHasData(u AmsUnit) bool {
+	return u.Humidity != nil || u.HumidityRaw != nil || u.Temp != nil || u.DryTime != nil ||
+		u.sfKnown || u.DrySetting != nil
+}
+
+// parseDrySetting reads an AMS unit's dry_setting. nil when it has nothing usable.
+func parseDrySetting(temp, dur, fil *json.RawMessage) *DrySetting {
+	var d DrySetting
+	if n, ok := flexInt(temp); ok && n > 0 && n <= 150 {
+		d.TempC = &n
+	}
+	if n, ok := flexInt(dur); ok && n > 0 && n <= 96 {
+		d.Hours = &n
+	}
+	if fil != nil {
+		var s string
+		if json.Unmarshal(*fil, &s) == nil {
+			d.Filament = cleanText(s, 24)
+		}
+	}
+	if d.TempC == nil && d.Hours == nil && d.Filament == "" {
+		return nil
+	}
+	return &d
+}
+
+// hexWord keeps a hex word as sent ("0002", "1F"), upper case, at most 16 digits.
+// Anything that isn't plain hex gives "".
+func hexWord(s string) string {
+	s = strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(s), "0x"), "0X")
+	if s == "" || len(s) > 16 {
+		return ""
+	}
+	for _, r := range s {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+			return ""
+		}
+	}
+	return strings.ToUpper(s)
+}
+
 // flexFloat reads a number sent as a number or a string ("24", "25.3").
 func flexFloat(raw *json.RawMessage) (float64, bool) {
 	if raw == nil {
@@ -418,6 +501,7 @@ type live struct {
 	command      *CommandResult
 	commandSeq   int
 	units        map[int]AmsUnit
+	trayExist    string
 }
 
 func (l *live) apply(u liveUpdate) {
@@ -489,6 +573,9 @@ func (l *live) apply(u liveUpdate) {
 	if l.units == nil {
 		l.units = map[int]AmsUnit{}
 	}
+	if u.trayExist != nil {
+		l.trayExist = *u.trayExist
+	}
 	for _, nu := range u.units {
 		cur := l.units[nu.ID]
 		cur.ID = nu.ID
@@ -506,6 +593,14 @@ func (l *live) apply(u liveUpdate) {
 		}
 		if nu.sfKnown {
 			cur.DrySfReason = nu.DrySfReason
+		}
+		if nu.InfoRaw != "" {
+			cur.InfoRaw = nu.InfoRaw
+		}
+		cur.hasData = cur.hasData || nu.hasData
+		if nu.DrySetting != nil {
+			ds := *nu.DrySetting
+			cur.DrySetting = &ds
 		}
 		l.units[nu.ID] = cur
 	}
@@ -540,7 +635,15 @@ func sideOf(id int, twoNozzles bool) string {
 func (l *live) amsUnits() []AmsUnit {
 	var out []AmsUnit
 	for _, u := range l.units {
+		if !u.hasData {
+			continue
+		}
 		u.DrySfReason = append([]string(nil), u.DrySfReason...)
+		if u.DrySetting != nil {
+			ds := *u.DrySetting
+			u.DrySetting = &ds
+		}
+		u.TrayExist = l.trayExist
 		out = append(out, u)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })

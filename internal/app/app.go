@@ -636,10 +636,15 @@ func syncUnits(us []printers.AmsUnit) []api.SyncAmsUnit {
 		if len(out) >= 16 {
 			break
 		}
-		out = append(out, api.SyncAmsUnit{
+		su := api.SyncAmsUnit{
 			AmsID: u.ID, HumidityRaw: u.HumidityRaw, Humidity: u.Humidity, Temp: u.Temp,
 			DryTime: u.DryTime, DrySfReason: u.DrySfReason,
-		})
+			InfoRaw: u.InfoRaw, TrayExist: u.TrayExist,
+		}
+		if d := u.DrySetting; d != nil {
+			su.DrySetting = &api.SyncDrySetting{Temp: d.TempC, Duration: d.Hours, Filament: d.Filament}
+		}
+		out = append(out, su)
 	}
 	return out
 }

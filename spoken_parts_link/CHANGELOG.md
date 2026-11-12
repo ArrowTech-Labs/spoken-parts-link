@@ -7,7 +7,14 @@
   filament preset id and how much is left, with the printer status it already
   sends. Spoken Parts uses them to track how wet each roll is (SPOK-FAIL-1).
   Older Spoken Parts versions ignore the new fields.
-- Nothing new is sent to the printers. The link still only reads their status.
+- Also passes on, read only, three things the AMS already reports: the dry the
+  printer was asked to run (temperature, hours and material, when the firmware
+  says), the unit's raw status word (its drying status bits), and the
+  printer's feeder sensor word (`tray_exist_bits`: which slots have filament
+  in the feeder tube). Spoken Parts uses them to tell when an AMS dry starts
+  and finishes, and whether a dried roll has been fed.
+- Nothing new is sent to the printers. The link still only reads their status
+  and still only ever sends the status request and the print start.
 
 ## 0.5.0
 

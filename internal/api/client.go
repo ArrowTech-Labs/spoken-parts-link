@@ -240,6 +240,19 @@ type SyncAmsUnit struct {
 	Temp        *float64 `json:"temp,omitempty"`
 	DryTime     *int     `json:"dry_time,omitempty"`
 	DrySfReason []string `json:"dry_sf_reason,omitempty"`
+	// ATS-SP-AMS-DRY-BUILD-1 (read only, optional): the unit's raw "info" hex
+	// word, the dry the printer was asked to run, and the printer's
+	// tray_exist_bits hex word (feeder sensors; one word for all units).
+	InfoRaw    string          `json:"info_raw,omitempty"`
+	DrySetting *SyncDrySetting `json:"dry_setting,omitempty"`
+	TrayExist  string          `json:"tray_exist,omitempty"`
+}
+
+// SyncDrySetting is an AMS unit's dry setting as the printer reported it.
+type SyncDrySetting struct {
+	Temp     *int   `json:"dry_temperature,omitempty"`
+	Duration *int   `json:"dry_duration,omitempty"`
+	Filament string `json:"dry_filament,omitempty"`
 }
 
 // SyncNozzle is one nozzle in a sync request.
