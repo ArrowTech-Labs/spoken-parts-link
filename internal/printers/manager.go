@@ -169,6 +169,8 @@ type Snapshot struct {
 	Nozzles     []Nozzle
 	Mapping     []int
 	TrayNow     *int
+	// SPOK-FAIL-1: each AMS unit's humidity, temperature and drying state.
+	AmsUnits []AmsUnit
 	// Command is the printer's last answer to a command, CommandSeq counts them.
 	Command    *CommandResult
 	CommandSeq int
@@ -543,6 +545,7 @@ func (m *Manager) Snapshot() []Snapshot {
 		s.Storage, s.TrayNow = cloneBool(l.storage), cloneInt(l.trayNow)
 		s.Mapping = append([]int(nil), l.mapping...)
 		s.Trays, s.Nozzles = l.snapshot()
+		s.AmsUnits = l.amsUnits()
 		if l.command != nil {
 			c := *l.command
 			s.Command, s.CommandSeq = &c, l.commandSeq

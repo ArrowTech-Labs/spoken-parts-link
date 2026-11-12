@@ -18,6 +18,48 @@ type Tray struct {
 	// "right", or "" (one nozzle, or not known).
 	Nozzle string
 	feeds  int // extruder id from the AMS info bits, -1 unknown
+	// SPOK-FAIL-1: the RFID tray id ("" when the roll has no Bambu tag), the
+	// filament preset id, and remain in percent (nil when the printer doesn't know).
+	UUID    string
+	InfoIdx string
+	Remain  *int
+}
+
+// AmsUnit is one AMS unit's humidity, temperature and drying state (SPOK-FAIL-1).
+// Each field is nil until the printer reported it.
+type AmsUnit struct {
+	ID          int
+	HumidityRaw *float64 // RH in percent (newer firmware)
+	Humidity    *int     // the 1..5 index
+	Temp        *float64 // C
+	DryTime     *int     // minutes of drying left
+	DrySfReason []string // why drying can't run (power, filament at the outlet)
+	sfKnown     bool
+	// ATS-SP-AMS-DRY-BUILD-1: read-only extras, sent as the printer reports them.
+	// InfoRaw is the unit's "info" hex word (its drying status bits are decoded by
+	// Spoken Parts once observed). DrySetting is the dry the printer was asked to
+	// run (nil when the firmware doesn't send it). TrayExist is the printer's
+	// tray_exist_bits hex word (the AMS feeder sensors, one word for all units).
+	InfoRaw    string
+	DrySetting *DrySetting
+	TrayExist  string
+	// dryKnown: this report carried a dry_setting; dryPatch is what it said,
+	// field by field. A field that is idle (-1, 0 or "", as the printer sends
+	// when no dry is set) clears that field; a field not sent is kept.
+	dryKnown bool
+	dryPatch *dryPatch
+	// hasData: the unit reported humidity, temperature or drying at least once.
+	// A unit with only its info word is never synced (an all-empty humidity
+	// sample would mean nothing to Spoken Parts).
+	hasData bool
+}
+
+// DrySetting is the AMS dry the printer was asked to run. Each field is nil or
+// "" when the firmware doesn't say.
+type DrySetting struct {
+	TempC    *int   // dry_temperature, C
+	Hours    *int   // dry_duration, hours
+	Filament string // dry_filament, a material name such as "PLA"
 }
 
 // Nozzle is one nozzle as the printer last reported it.
@@ -66,6 +108,8 @@ type liveUpdate struct {
 	mapKnown   bool
 	nozzles    []Nozzle
 	command    *CommandResult
+	units      []AmsUnit
+	trayExist  *string
 }
 
 type trayUpdate struct {
@@ -73,6 +117,9 @@ type trayUpdate struct {
 	feeds         int
 	typ           *string
 	color         *string
+	uuid          *string
+	infoIdx       *string
+	remain        *int
 }
 
 func parseLive(payload []byte) (liveUpdate, bool) {
@@ -100,8 +147,18 @@ func parseLive(payload []byte) (liveUpdate, bool) {
 					ID   json.RawMessage              `json:"id"`
 					Info string                       `json:"info"`
 					Tray []map[string]json.RawMessage `json:"tray"`
+					// SPOK-FAIL-1: humidity and drying, per unit.
+					Humidity    *json.RawMessage `json:"humidity"`
+					HumidityRaw *json.RawMessage `json:"humidity_raw"`
+					Temp        *json.RawMessage `json:"temp"`
+					DryTime     *json.RawMessage `json:"dry_time"`
+					// Decoded leniently below: a wrongly typed value drops only
+					// that field, never the rest of the report.
+					DrySfReason *json.RawMessage `json:"dry_sf_reason"`
+					DrySetting  *json.RawMessage `json:"dry_setting"`
 				} `json:"ams"`
-				TrayNow *json.RawMessage `json:"tray_now"`
+				TrayNow       *json.RawMessage `json:"tray_now"`
+				TrayExistBits *json.RawMessage `json:"tray_exist_bits"`
 			} `json:"ams"`
 			Device *struct {
 				Nozzle *struct {
@@ -193,6 +250,14 @@ func parseLive(payload []byte) (liveUpdate, bool) {
 		if n, ok := flexInt(p.AMS.TrayNow); ok && n >= 0 && n <= 255 {
 			u.trayNow = &n
 		}
+		if p.AMS.TrayExistBits != nil {
+			var s string
+			if json.Unmarshal(*p.AMS.TrayExistBits, &s) == nil {
+				if h := hexWord(s); h != "" {
+					u.trayExist = &h
+				}
+			}
+		}
 		for _, unit := range p.AMS.AMS {
 			id, ok := flexInt((*json.RawMessage)(&unit.ID))
 			if !ok || id < 0 || id > 255 {
@@ -201,6 +266,31 @@ func parseLive(payload []byte) (liveUpdate, bool) {
 			feeds := -1
 			if info, err := strconv.ParseUint(strings.TrimSpace(unit.Info), 16, 32); err == nil {
 				feeds = int(info>>8) & 0xF
+			}
+			var reasons *[]json.RawMessage
+			if unit.DrySfReason != nil {
+				var rs []json.RawMessage
+				if json.Unmarshal(*unit.DrySfReason, &rs) == nil {
+					reasons = &rs
+				}
+			}
+			au, _ := parseUnit(id, unit.Humidity, unit.HumidityRaw, unit.Temp, unit.DryTime, reasons)
+			au.InfoRaw = hexWord(unit.Info)
+			if unit.DrySetting != nil {
+				var ds struct {
+					Temp     *json.RawMessage `json:"dry_temperature"`
+					Duration *json.RawMessage `json:"dry_duration"`
+					Filament *json.RawMessage `json:"dry_filament"`
+				}
+				if json.Unmarshal(*unit.DrySetting, &ds) == nil {
+					au.dryPatch = parseDrySetting(ds.Temp, ds.Duration, ds.Filament)
+					au.dryKnown = au.dryPatch != nil
+					au.DrySetting = au.dryPatch.setting()
+				}
+			}
+			au.hasData = unitHasData(au)
+			if au.hasData || au.InfoRaw != "" {
+				u.units = append(u.units, au)
 			}
 			for _, tr := range unit.Tray {
 				rawID, ok := tr["id"]
@@ -224,6 +314,29 @@ func parseLive(payload []byte) (liveUpdate, bool) {
 					c := trayColor(s)
 					t.color = &c
 				}
+				if raw, ok := tr["tray_uuid"]; ok {
+					var s string
+					_ = json.Unmarshal(raw, &s)
+					s = trayID(s, 40)
+					if strings.Trim(s, "0") == "" {
+						s = "" // all zeros: a roll without a Bambu RFID tag
+					}
+					t.uuid = &s
+				}
+				if raw, ok := tr["tray_info_idx"]; ok {
+					var s string
+					_ = json.Unmarshal(raw, &s)
+					s = trayID(s, 12)
+					t.infoIdx = &s
+				}
+				if raw, ok := tr["remain"]; ok {
+					if n, ok := flexInt(&raw); ok {
+						if n < 0 || n > 100 {
+							n = -1 // the printer doesn't know
+						}
+						t.remain = &n
+					}
+				}
 				u.trays = append(u.trays, t)
 			}
 		}
@@ -239,6 +352,149 @@ func parseLive(payload []byte) (liveUpdate, bool) {
 		u.nozzles = []Nozzle{{ID: 0, Diameter: d}}
 	}
 	return u, true
+}
+
+// parseUnit reads one AMS unit's humidity fields. ok is false when it has none.
+func parseUnit(id int, humidity, raw, temp, dry *json.RawMessage, reasons *[]json.RawMessage) (AmsUnit, bool) {
+	u := AmsUnit{ID: id}
+	if n, ok := flexInt(humidity); ok && n >= 1 && n <= 5 {
+		u.Humidity = &n
+	}
+	if f, ok := flexFloat(raw); ok && f >= 0 && f <= 100 {
+		u.HumidityRaw = &f
+	}
+	if f, ok := flexFloat(temp); ok && f > -20 && f < 150 {
+		u.Temp = &f
+	}
+	if n, ok := flexInt(dry); ok && n >= 0 && n <= 100000 {
+		u.DryTime = &n
+	}
+	if reasons != nil {
+		u.sfKnown = true
+		for i, r := range *reasons {
+			if i >= 8 {
+				break
+			}
+			var s string
+			if json.Unmarshal(r, &s) != nil {
+				s = string(r)
+			}
+			if s = cleanText(s, 40); s != "" {
+				u.DrySfReason = append(u.DrySfReason, s)
+			}
+		}
+	}
+	ok := u.Humidity != nil || u.HumidityRaw != nil || u.Temp != nil || u.DryTime != nil || u.sfKnown
+	return u, ok
+}
+
+// unitHasData is true when a unit report carries anything worth syncing.
+func unitHasData(u AmsUnit) bool {
+	return u.Humidity != nil || u.HumidityRaw != nil || u.Temp != nil || u.DryTime != nil ||
+		u.sfKnown || u.dryKnown
+}
+
+// dryPatch is one report's dry_setting: which fields it carried and their values
+// (nil or "" when idle or out of range).
+type dryPatch struct {
+	hasTemp, hasHours, hasFilament bool
+	DrySetting
+}
+
+// setting is the patch on its own (nil when it sets nothing).
+func (p *dryPatch) setting() *DrySetting {
+	if p == nil {
+		return nil
+	}
+	return p.applyTo(nil)
+}
+
+// applyTo merges the patch into cur and returns the result (nil when no field is set).
+func (p *dryPatch) applyTo(cur *DrySetting) *DrySetting {
+	var d DrySetting
+	if cur != nil {
+		d = *cur
+	}
+	if p.hasTemp {
+		d.TempC = p.TempC
+	}
+	if p.hasHours {
+		d.Hours = p.Hours
+	}
+	if p.hasFilament {
+		d.Filament = p.Filament
+	}
+	if d.TempC == nil && d.Hours == nil && d.Filament == "" {
+		return nil
+	}
+	return &d
+}
+
+// parseDrySetting reads an AMS unit's dry_setting. nil when it carried no field.
+func parseDrySetting(temp, dur, fil *json.RawMessage) *dryPatch {
+	if temp == nil && dur == nil && fil == nil {
+		return nil
+	}
+	p := &dryPatch{hasTemp: temp != nil, hasHours: dur != nil, hasFilament: fil != nil}
+	if n, ok := flexInt(temp); ok && n > 0 && n <= 150 {
+		p.TempC = &n
+	}
+	if n, ok := flexInt(dur); ok && n > 0 && n <= 96 {
+		p.Hours = &n
+	}
+	if fil != nil {
+		var s string
+		if json.Unmarshal(*fil, &s) == nil {
+			p.Filament = cleanText(s, 24)
+		}
+	}
+	return p
+}
+
+// hexWord keeps a hex word as sent ("0002", "1F"), upper case, at most 16 digits.
+// Anything that isn't plain hex gives "".
+func hexWord(s string) string {
+	s = strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(s), "0x"), "0X")
+	if s == "" || len(s) > 16 {
+		return ""
+	}
+	for _, r := range s {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+			return ""
+		}
+	}
+	return strings.ToUpper(s)
+}
+
+// flexFloat reads a number sent as a number or a string ("24", "25.3").
+func flexFloat(raw *json.RawMessage) (float64, bool) {
+	if raw == nil {
+		return 0, false
+	}
+	var f float64
+	if err := json.Unmarshal(*raw, &f); err == nil {
+		return f, true
+	}
+	var s string
+	if json.Unmarshal(*raw, &s) != nil {
+		return 0, false
+	}
+	f, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	return f, err == nil
+}
+
+// trayID keeps letters and digits only (an RFID tray uuid or a preset id).
+func trayID(s string, max int) string {
+	var b strings.Builder
+	for _, r := range strings.TrimSpace(s) {
+		if b.Len() >= max {
+			break
+		}
+		if (r >= '0' && r <= '9') || (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // trayColor turns "RRGGBBAA" into "#RRGGBB".
@@ -302,6 +558,8 @@ type live struct {
 	nozzles      map[int]Nozzle
 	command      *CommandResult
 	commandSeq   int
+	units        map[int]AmsUnit
+	trayExist    string
 }
 
 func (l *live) apply(u liveUpdate) {
@@ -351,7 +609,57 @@ func (l *live) apply(u liveUpdate) {
 		if t.color != nil && cur.Type != "" {
 			cur.Color = *t.color
 		}
+		if t.uuid != nil {
+			cur.UUID = *t.uuid
+		}
+		if t.infoIdx != nil {
+			cur.InfoIdx = *t.infoIdx
+		}
+		if t.remain != nil {
+			if *t.remain < 0 {
+				cur.Remain = nil
+			} else {
+				n := *t.remain
+				cur.Remain = &n
+			}
+		}
+		if t.typ != nil && *t.typ == "" {
+			cur.UUID, cur.InfoIdx, cur.Remain = "", "", nil
+		}
 		l.trays[key] = cur
+	}
+	if l.units == nil {
+		l.units = map[int]AmsUnit{}
+	}
+	if u.trayExist != nil {
+		l.trayExist = *u.trayExist
+	}
+	for _, nu := range u.units {
+		cur := l.units[nu.ID]
+		cur.ID = nu.ID
+		if nu.Humidity != nil {
+			cur.Humidity = nu.Humidity
+		}
+		if nu.HumidityRaw != nil {
+			cur.HumidityRaw = nu.HumidityRaw
+		}
+		if nu.Temp != nil {
+			cur.Temp = nu.Temp
+		}
+		if nu.DryTime != nil {
+			cur.DryTime = nu.DryTime
+		}
+		if nu.sfKnown {
+			cur.DrySfReason = nu.DrySfReason
+		}
+		if nu.InfoRaw != "" {
+			cur.InfoRaw = nu.InfoRaw
+		}
+		cur.hasData = cur.hasData || nu.hasData
+		if nu.dryKnown {
+			cur.DrySetting = nu.dryPatch.applyTo(cur.DrySetting)
+		}
+		l.units[nu.ID] = cur
 	}
 	if len(u.nozzles) > 0 {
 		l.nozzles = map[int]Nozzle{}
@@ -378,6 +686,25 @@ func sideOf(id int, twoNozzles bool) string {
 		return "left"
 	}
 	return ""
+}
+
+// amsUnits is every unit's last humidity report, by unit id.
+func (l *live) amsUnits() []AmsUnit {
+	var out []AmsUnit
+	for _, u := range l.units {
+		if !u.hasData {
+			continue
+		}
+		u.DrySfReason = append([]string(nil), u.DrySfReason...)
+		if u.DrySetting != nil {
+			ds := *u.DrySetting
+			u.DrySetting = &ds
+		}
+		u.TrayExist = l.trayExist
+		out = append(out, u)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
 }
 
 func (l *live) snapshot() (trays []Tray, nozzles []Nozzle) {
