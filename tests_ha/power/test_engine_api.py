@@ -144,7 +144,9 @@ def test_held_off_plug_reporting_power_late_is_only_failed_open_after_a_reread()
     eng.on_power("HT1", 0, 81.4)  # the re-read says it is off
     assert not p.failed_open
     eng.on_power("HT1", 170, 90)
-    eng.on_power("HT1", 170, 90.5)  # the re-read agrees: it really is drawing
+    eng.on_power("HT1", 170, 90.5)  # too soon: could be another late report
+    assert not p.failed_open
+    eng.on_power("HT1", 170, 91.3)  # the re-read agrees: it really is drawing
     assert p.failed_open and followups(eng, "failed_open")
 
 

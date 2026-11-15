@@ -90,6 +90,7 @@ class PowerRuntime:
         self.last_tick = 0.0
         self.last_push = 0.0
         self.last_seq_saved = -1
+        self.save_due = False
         self.settings_result: dict[str, Any] | None = None
         self.tasks: set[asyncio.Task] = set()
 
@@ -159,8 +160,15 @@ class PowerRuntime:
             ieee = ieee_of(dev.identifiers)
             if not ieee:
                 continue
-            ents = [e.entity_id for e in er.async_entries_for_device(entreg, dev.id)
-                    if not e.disabled_by]
+            ents = [{
+                "entity_id": e.entity_id,
+                "platform": e.platform,
+                "unique_id": e.unique_id,
+                "translation_key": e.translation_key,
+                "original_name": e.original_name,
+                "entity_category": str(e.entity_category) if e.entity_category else None,
+                "device_class": e.device_class or e.original_device_class,
+            } for e in er.async_entries_for_device(entreg, dev.id) if not e.disabled_by]
             inv[ieee] = {
                 "ieee": ieee,
                 "ha_name": dev.name_by_user or dev.name or ieee,
@@ -195,14 +203,18 @@ class PowerRuntime:
     @callback
     def seed_states(self) -> None:
         """Current states, with their real age, so nothing counts as fresh."""
-        now_m, now_w = time.monotonic(), dt_util.utcnow()
         for eid, (ieee, role) in self.by_entity.items():
             st = self.hass.states.get(eid)
             if st is None:
                 continue
-            when = getattr(st, "last_reported", None) or st.last_updated
-            t = now_m - max(0.0, (now_w - when).total_seconds())
+            t = self._measured(st)
             self._apply_state(ieee, role, st, t)
+
+    @staticmethod
+    def _measured(st: Any) -> float:
+        """When Home Assistant got this reading, on the monotonic clock."""
+        when = getattr(st, "last_reported", None) or st.last_updated
+        return time.monotonic() - max(0.0, (dt_util.utcnow() - when).total_seconds())
 
     def _apply_state(self, ieee: str, role: str, st: Any, t: float) -> None:
         if role == "power":
@@ -215,7 +227,9 @@ class PowerRuntime:
                 return
             if st.attributes.get("unit_of_measurement") == "kW":
                 w *= 1000.0
-            self.engine.on_power(ieee, w, t)
+            # Arrival now, measured when Home Assistant got it. A valid reading also
+            # marks the plug reachable again.
+            self.engine.on_power(ieee, w, time.monotonic(), measured=self._measured(st))
         else:
             self.engine.on_relay(ieee, st.state, t)
 
@@ -232,6 +246,7 @@ class PowerRuntime:
         t = time.monotonic()
         self._apply_state(hit[0], hit[1], new, t)
         self.engine.tick(t)
+        self._schedule_save()
 
     # ---- clock and storage -------------------------------------------------------------
     @callback
@@ -242,11 +257,19 @@ class PowerRuntime:
         if t - self.last_push >= 1.0:
             self.last_push = t
             async_dispatcher_send(self.hass, SIGNAL_UPDATE)
-        if self.engine.journal.seq != self.last_seq_saved:
-            self.last_seq_saved = self.engine.journal.seq
+        self._schedule_save()
+
+    @callback
+    def _schedule_save(self) -> None:
+        """Save within SAVE_DELAY_S of the first unsaved entry. Not re-armed while one is
+        due, so a steady stream of entries cannot keep pushing the save back."""
+        if self.engine.journal.seq != self.last_seq_saved and not self.save_due:
+            self.save_due = True
             self.store.async_delay_save(self._store_data, SAVE_DELAY_S)
 
     def _store_data(self) -> dict[str, Any]:
+        self.save_due = False
+        self.last_seq_saved = self.engine.journal.seq
         data = self.engine.to_store(time.monotonic())
         data["engine_id"] = self.engine_id
         return data
@@ -311,6 +334,7 @@ class PowerRuntime:
     def apply_config(self, doc: dict[str, Any]) -> dict[str, Any]:
         res = self.engine.apply_config(doc, time.monotonic())
         self._mark_controllable()
+        self.save_due = True
         self.store.async_delay_save(self._store_data, 1)
         async_dispatcher_send(self.hass, SIGNAL_UPDATE)
         return res

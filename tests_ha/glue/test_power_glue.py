@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import pytest
 from homeassistant import config_entries
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import device_registry as dr
@@ -32,13 +33,21 @@ class FakeZha:
         dev = devreg.async_get_or_create(
             config_entry_id=self.zha.entry_id, identifiers={("zha", ieee)},
             manufacturer=maker, model=model, name=base.replace("_", " "))
-        for domain, suffix in (("switch", ""), ("sensor", "_power"), ("sensor", "_voltage"),
-                               ("number", "_power_rise_threshold"),
-                               ("number", "_power_drop_threshold"),
-                               ("switch", "_metering_only_mode"),
-                               ("select", "_power_on_behavior"), ("update", "_firmware")):
-            entreg.async_get_or_create(domain, "zha", f"{ieee}-{domain}{suffix}",
-                                       suggested_object_id=f"{base}{suffix}", device_id=dev.id)
+        for domain, suffix, uid, cat in (
+                ("switch", "", "1-6", None), ("sensor", "_power", "1-2820", None),
+                ("sensor", "_voltage", "1-2820-rms_voltage", None),
+                ("number", "_power_rise_threshold", "1-65535-power_rise_threshold", "config"),
+                ("number", "_power_drop_threshold", "1-65535-power_drop_threshold", "config"),
+                ("switch", "_metering_only_mode", "1-65535-metering_only_mode", "config"),
+                ("select", "_power_on_behavior", "1-6-start_up_on_off", "config"),
+                ("update", "_firmware", "1-25-firmware_update", "config")):
+            entreg.async_get_or_create(
+                domain, "zha", f"{ieee}-{uid}", suggested_object_id=f"{base}{suffix}",
+                device_id=dev.id,
+                entity_category=EntityCategory(cat) if cat else None)
+        # Another integration's switch on the same device: never the relay.
+        entreg.async_get_or_create("switch", "template", f"{ieee}-tpl",
+                                   suggested_object_id="a", device_id=dev.id)
         self.hass.states.async_set(f"switch.{base}", "on")
         self.hass.states.async_set(f"sensor.{base}_power", str(watts),
                                    {"unit_of_measurement": "W"})
@@ -121,6 +130,7 @@ async def test_inventory_hello_config_and_a_real_shed(hass: HomeAssistant, zha, 
     assert set(rt.inventory) == {HT, PR}, "only THIRDREALITY 3RSP02064Z plugs"
     assert rt.inventory[HT]["ents"]["switch"] == "switch.ams_ht_plug"
     assert rt.inventory[HT]["ents"]["power"] == "sensor.ams_ht_plug_power"
+    assert rt.inventory[HT]["ents"]["metering_only"] == "switch.ams_ht_plug_metering_only_mode"
     client = await hass_ws_client(hass)
     hello = await ws(client, type="spoken_parts_power/hello")
     assert hello["id"].startswith("e-") and hello["switching_allowed"] is True
@@ -197,4 +207,19 @@ async def test_person_command_is_refused_for_a_plug_the_engine_did_not_turn_off(
                    request={"id": "r1", "kind": "power_on", "plug": PR, "by": "Marc"})
     assert res["result"] == "refused"
     assert not [c for c in zha.calls if c[0] == "switch"]
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_reading_marks_plug_reachable_and_measured_time_is_used(hass: HomeAssistant, zha,
+                                                                     hass_ws_client) -> None:
+    entry = await setup(hass)
+    rt = entry.runtime_data
+    client = await hass_ws_client(hass)
+    await ws(client, type="spoken_parts_power/config", config=config())
+    hass.states.async_set("sensor.ams_ht_plug_power", "unavailable")
+    await hass.async_block_till_done()
+    assert not rt.engine.plugs[HT].reachable
+    hass.states.async_set("sensor.ams_ht_plug_power", "120", {"unit_of_measurement": "W"})
+    await hass.async_block_till_done()
+    assert rt.engine.plugs[HT].reachable and rt.engine.plugs[HT].w == 120
     await hass.config_entries.async_unload(entry.entry_id)

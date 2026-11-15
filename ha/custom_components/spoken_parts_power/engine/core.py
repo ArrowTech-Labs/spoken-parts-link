@@ -194,7 +194,9 @@ class Plug:
     gave_up: bool = False
     blocked_logged: bool = False
     pending: str | None = None  # "on" or "off" while a command is out
-    suspect_at: float | None = None  # a held-off plug reported power: re-read before believing it
+    suspect_at: float | None = None  # an off plug reported power: re-read before believing it
+    suspect_reread: bool = False
+    unavailable_at: float = -1e9
     pending_at: float = -1e9
     person_on: bool = False
     read_at: float = -1e9
@@ -295,6 +297,8 @@ class Circuit:
         self.over_logged = False
         self.blind_reason = ""
         self.pending: CircuitCfg | None = None
+        self.drop_after = False
+        self.switching_off_logged = False
         self.lost_print = False
 
     # ---- sums ---------------------------------------------------------------------
@@ -307,10 +311,10 @@ class Circuit:
         return p.w
 
     def total(self, t: float, verified_only: bool = False) -> float:
-        return self.cfg.unmetered_w + sum(
-            self.eff(p, t) for p in self.plugs.values()
-            if not verified_only or self._verified(p, t)
-        )
+        if verified_only:  # measured watts only: a booked (in-flight) restore is not a reading
+            return self.cfg.unmetered_w + sum(
+                0.0 if p.zeroed else p.w for p in self.plugs.values() if self._verified(p, t))
+        return self.cfg.unmetered_w + sum(self.eff(p, t) for p in self.plugs.values())
 
     def _verified(self, p: Plug, t: float) -> bool:
         return p.zeroed or t - p.at <= self.tm.fresh_s
@@ -365,7 +369,10 @@ class Circuit:
                     continue
                 stale = " (feed %ds old)" % age if age > tm.feed_stale_s else ""
                 if f.state in NOT_PRINTING:
-                    c = Cand(p, 2, (w, p.key), w, None, "printer not printing" + stale)
+                    if stale:  # never cut a printer as idle on an old feed
+                        skipped.append((p.key, "printer state not known (feed %ds old)" % age))
+                        continue
+                    c = Cand(p, 2, (w, p.key), w, None, "printer not printing")
                 elif f.state == "starting":
                     c = Cand(p, 3, (0, 0, -w, p.key), w, 0, "starting, nothing deposited" + stale)
                 elif f.value is None:
@@ -414,7 +421,8 @@ class Circuit:
         tm = self.tm
         now_w = self.total(t)
         self.samples.append((t, now_w))
-        self.hist.append((t, now_w))
+        if self.state not in ("BLIND", "STARTING"):  # untrusted sums never enter the hold window
+            self.hist.append((t, now_w))
         if len(self.samples) > 4000:
             del self.samples[:2000]
         cut = t - max(tm.max_hold_s, tm.room_window_s) - 5
@@ -440,6 +448,7 @@ class Circuit:
             if fresh or t - self.started_at >= tm.start_timeout_s:
                 self.state = "HOLD" if self.event_open else "WATCH"
                 self._reset_window(t)
+                self._reset_calm(t)
                 self._log(t, "armed", state=self.state, sum=round(self.total(t)),
                           waited_s=round(t - self.started_at, 1), all_fresh=fresh)
         elif st == "BLIND":
@@ -448,6 +457,7 @@ class Circuit:
                 if self.blind_reason == "no_power":
                     self._followup(t, "no_power", False)
                 self.state, self.started_at, self.blind_reason = "STARTING", t, ""
+                self._reset_calm(t)
                 for p in self.plugs.values():
                     if p.reachable:
                         p.read_at = t
@@ -457,7 +467,19 @@ class Circuit:
                 self._decide_sacrifice(t)
         elif st == "LOCKOUT":
             self._lockout(t)
+        elif st in ACTIVE_STATES and not self.eng.switching_allowed:
+            # Switching is off in Home Assistant: measure only. One clear entry,
+            # no trips, no restores, no tries used up.
+            if not self.switching_off_logged:
+                self.switching_off_logged = True
+                self._log(t, "switching_off", why="switching is turned off in Home Assistant")
+            self.hard_since = None
+            return
         elif st in ACTIVE_STATES:
+            if self.switching_off_logged:
+                self.switching_off_logged = False
+                self._reset_window(t)
+                self._log(t, "switching_on")
             if self._tripped(t):
                 self._trip(t)
             elif st == "RESTORE":
@@ -472,6 +494,11 @@ class Circuit:
         if p.zeroed and p.confirmed_at is not None and not p.verify_sent \
                 and t - p.confirmed_at >= tm.verify_off_s:
             p.verify_sent = True
+            p.read_at = t
+            self.eng.act.read(p.key, t)
+        # A plug that should be off reported power: ask it again before believing it.
+        if p.suspect_at is not None and not p.suspect_reread and t - p.suspect_at >= 1.0:
+            p.suspect_reread = True
             p.read_at = t
             self.eng.act.read(p.key, t)
         # Heartbeat: the plug has no reporting interval of its own, so ask it.
@@ -521,11 +548,17 @@ class Circuit:
         self.blind_reason = "no_power" if all_gone and len(ps) >= 2 else "lost_contact"
         self.state = "BLIND"
         self.hard_since = None
+        self._reset_calm(t)
         why = ("every plug on this circuit stopped answering" if self.blind_reason == "no_power"
                else "more than half of the plugs are not reachable")
         self._log(t, "blind", why=why, reason=self.blind_reason)
         if self.blind_reason == "no_power":
             self._followup(t, "no_power", True)
+
+    def _reset_calm(self, t: float) -> None:
+        """The restore calm clock and its hold window start again (BLIND, STARTING)."""
+        self.under_since = None
+        self.hist = []
 
     def _reset_window(self, t: float) -> None:
         self.window_from = t
@@ -668,14 +701,20 @@ class Circuit:
                       outcome=self.outcome, still_zeroed=[p.key for p in self.fired if p.zeroed])
             if bad and self.outcome != "cant_protect":
                 self._followup(t, "cant_protect", True, sum=round(s), outcome=self.outcome)
+            if self.pending is not None and (not self.pending.protect or self.drop_after):
+                self.eng._apply_pending(self, t)  # protection off waits for the lockout, no longer
 
     # ---- restore (DESIGN 7, 4C) --------------------------------------------------------
     def waiting(self) -> list[Plug]:
         return sorted(
-            (p for p in self.plugs.values()
-             if p.shed_kind in ("heater", "idle") and p.relay == "off"
-             and not p.failed_open and not p.gave_up and p.controllable),
+            (p for p in self.held() if not p.gave_up),
             key=lambda p: (p.shed_kind != "heater", p.shed_at, p.key))
+
+    def held(self) -> list[Plug]:
+        """Heaters and idle printers the engine turned off and still owns (gave up included)."""
+        return [p for p in self.plugs.values()
+                if p.shed_kind in ("heater", "idle") and p.relay == "off"
+                and not p.failed_open and p.controllable]
 
     def predicted_floor(self) -> tuple[float | None, Plug | None]:
         best: tuple[float | None, Plug | None] = (None, None)
@@ -700,17 +739,27 @@ class Circuit:
             return
         waiting = self.waiting()
         if not waiting:
-            if s <= cfg.shed_w and self.event_open:
-                self._close_event(t)
+            # The event stays open while a heater that used its tries is still off
+            # (a person can say Try again). Nothing held: back to watching.
+            if s <= cfg.shed_w and not self.held():
+                if self.event_open:
+                    self._close_event(t)
+                else:
+                    self.state = "WATCH"
             return
         if self.under_since is None:
             return
         floor, _ = self.predicted_floor()
         if floor is not None and t < floor:
             return  # the predicted heat-up window is not over yet
+        heater_pending = False
         for p in waiting:
             window = min(tm.restore_hold_s * p.hold_mult, tm.max_hold_s)
+            if p.shed_kind == "idle" and heater_pending:
+                return  # strictly heaters first: an idle printer waits for them
             if t - self.under_since < window:
+                if p.shed_kind == "heater":
+                    heater_pending = True  # it may still fit when its window is over
                 continue
             hold_max = self.worst(t, window)  # worst sum in the hold window
             if p.tries >= tm.restore_tries:
@@ -772,6 +821,8 @@ class Circuit:
         if p.shed_kind != "heater":
             return False, "This plug is not being held off."
         p.tries, p.gave_up, p.hold_mult, p.blocked_logged = 0, False, 1, False
+        if self.state == "WATCH":
+            self.state = "HOLD"  # so the restore rules run again
         self._followup(t, "restore_blocked", False, plug=p.key)
         return True, "It comes back by itself when there is room."
 
@@ -840,6 +891,7 @@ class Engine:
         self.feed_at = -1e9
         self._last_t = 0.0
         self.faults = 0
+        self._deferred: set[str] = set()
 
     def _entry(self, t: float, kind: str, circuit: str | None, plug: str | None,
                event: int | None, data: dict[str, Any]) -> None:
@@ -882,6 +934,7 @@ class Engine:
                                            breaker_amps=c.cfg.breaker_amps, volts=c.cfg.volts,
                                            shed_w=c.cfg.shed_w, restore_w=c.cfg.restore_w,
                                            hard_w=c.cfg.hard_w)
+                    c.drop_after = True
                     continue
                 self._drop_circuit(c, t)
         for cid, cfg in new.items():
@@ -895,12 +948,13 @@ class Engine:
                     self._read_all(c, t)
                 self._log_config(c, t)
                 continue
-            busy = c.event_open or c.state in ("SHED", "LOCKOUT")
-            if busy and cfg.protect:
-                c.pending = cfg
+            in_shot = c.state in ("SHED", "LOCKOUT")
+            busy = c.event_open or in_shot
+            c.pending = cfg
+            if (busy and cfg.protect) or in_shot:
+                # Waits for the event to end; protection off waits only for the lockout.
                 pending.append(cid)
             else:
-                c.pending = cfg
                 self._apply_pending(c, t)
         # Plugs on no circuit (or a circuit that is not there) are only measured.
         for key, d in plug_docs.items():
@@ -932,18 +986,44 @@ class Engine:
         cfg = c.pending
         if cfg is None:
             return
+        if c.state in ("SHED", "LOCKOUT"):
+            return  # never mid-shot: applied at the end of the lockout
         c.pending = None
+        if c.drop_after:
+            self._drop_circuit(c, t)
+            self._rebind_deferred(t)
+            return
         was_off = c.state == "OFF"
         c.cfg = cfg
-        if not cfg.protect and c.state not in ("SHED", "LOCKOUT"):
+        if not cfg.protect:
             # Protection off: nothing more is switched. Plugs held off stay off.
+            if c.event_open:
+                c._log(t, "event_close", minutes=round((t - c.opened_at) / 60, 1),
+                       rounds=c.rounds, peak=round(c.peak), lost_print=c.lost_print,
+                       why="protection turned off")
+                c.event_open = False
+                c.closed_at = t
             c.state = "OFF"
-            c.event_open = False
         self._bind(c, t)
         if cfg.protect and (was_off or c.state == "OFF") and c.plugs:
             c.state, c.started_at = "STARTING", t
             self._read_all(c, t)
         self._log_config(c, t)
+        self._rebind_deferred(t)
+
+    @staticmethod
+    def _busy(c: Circuit) -> bool:
+        return c.event_open or c.pending is not None or c.state in ("SHED", "LOCKOUT")
+
+    def _rebind_deferred(self, t: float) -> None:
+        """Plugs that move between circuits wait until both circuits are quiet (row 16)."""
+        for cid in sorted(self._deferred):
+            c = self.circuits.get(cid)
+            if c is None:
+                self._deferred.discard(cid)
+            elif not self._busy(c):
+                self._deferred.discard(cid)
+                self._bind(c, t)
 
     def _bind(self, c: Circuit, t: float) -> None:
         docs = getattr(self, "_plug_docs", {})
@@ -954,12 +1034,15 @@ class Engine:
         added = False
         for key in keep:
             p = self._plug(key)
-            self._set_plug(p, docs[key])
             if key not in c.plugs:
-                added = True
                 prev = self.circuits.get(p.circuit) if p.circuit else None
                 if prev is not None and prev is not c:
+                    if self._busy(prev):
+                        self._deferred.add(c.cfg.id)  # moves when its old circuit is quiet
+                        continue
                     prev.plugs.pop(key, None)
+                added = True
+            self._set_plug(p, docs[key])
             p.circuit = c.cfg.id
             c.plugs[key] = p
         if not c.plugs or not c.cfg.protect:
@@ -1016,11 +1099,36 @@ class Engine:
         return self.circuits.get(p.circuit) if p and p.circuit else None
 
     # ---- inputs ------------------------------------------------------------------------
-    def on_power(self, key: str, w: float, t: float) -> None:
+    def on_power(self, key: str, w: float, t: float, measured: float | None = None) -> None:
+        self._guarded(key, t, self._on_power, key, w, t, measured)
+
+    def _off_but_drawing(self, p: Plug, w: float, t: float, m: float, c: Circuit | None,
+                         why: str) -> None:
+        """A plug that should be off reported power. Believed only when it was measured
+        well after the relay confirmed off and a direct re-read agrees (rule 4)."""
+        since = m - (p.confirmed_at if p.confirmed_at is not None else (p.fired_at or m))
+        if since < self.tm.verify_off_s:
+            return  # measured before the cut, still in flight
+        if p.suspect_at is None or t - p.suspect_at > 10:
+            p.suspect_at, p.suspect_reread, p.read_at = t, False, t
+            self.act.read(p.key, t)
+            return
+        if m < p.suspect_at + 1.0:
+            return  # not the re-read yet: could be another late report
+        p.suspect_at = None
+        p.zeroed, p.failed_open, p.w, p.at = False, True, w, m
+        if c:
+            c._log(t, "failed_open", plug=p.key, w=w, why=why)
+            c._followup(t, "failed_open", True, plug=p.key, label=p.label, w=round(w))
+
+    def _on_power(self, key: str, w: float, t: float, measured: float | None) -> None:
         p = self._plug(key)
         tm = self.tm
         if w is None or not math.isfinite(w) or w < 0:
             return
+        m = t if measured is None else min(measured, t)
+        if m < p.at:
+            return  # older than what we already have
         if w > tm.max_plug_w:  # the plug cannot carry it: discard and re-read
             p.read_at = t
             self.act.read(key, t)
@@ -1028,6 +1136,10 @@ class Engine:
         c = self.circuit_of(key)
         if p.at > -1e8:
             p.gaps = (p.gaps + [round(t - p.at, 2)])[-30:]
+        if not p.available and m > p.unavailable_at:
+            p.available = True  # a valid reading taken after it went away: it answers again
+            if c:
+                c._log(t, "plug_back", plug=key, via="reading")
         if p.silent:
             p.silent = False
             if c:
@@ -1039,36 +1151,19 @@ class Engine:
             if p.confirmed_at is None:
                 return  # rule 2: measured before the relay opened
             if w <= tm.off_w:
-                p.zeroed, p.w, p.at = False, w, t  # a fresh post-off reading replaces the zero
+                p.zeroed, p.w, p.at = False, w, m  # a fresh post-off reading replaces the zero
+                p.suspect_at = None
                 if c:
                     c._log(t, "shed_settled", plug=key, w=w)
-            elif t - p.confirmed_at >= tm.verify_off_s:
-                p.zeroed, p.failed_open, p.w, p.at = False, True, w, t  # rule 4: evidence
-                if c:
-                    c._log(t, "failed_open", plug=key, w=w, why="still drawing after it confirmed off")
-                    c._followup(t, "failed_open", True, plug=key, label=p.label, w=round(w))
+            else:
+                self._off_but_drawing(p, w, t, m, c, "still drawing after it confirmed off")
             return
         if p.shed_kind and p.relay == "off" and not p.failed_open:
-            # Held off by the engine. A high reading is only believed when it comes
-            # well after the relay confirmed off and a direct re-read agrees (rule 4).
             if w > tm.off_w:
-                since = t - (p.confirmed_at if p.confirmed_at is not None else (p.fired_at or t))
-                if since < tm.verify_off_s:
-                    return  # measured before the cut, still in flight
-                if p.suspect_at is None or t - p.suspect_at > 10:
-                    p.suspect_at = p.read_at = t
-                    self.act.read(key, t)
-                    return
-                if t - p.suspect_at < 0.2:
-                    return
-                p.suspect_at = None
-                p.failed_open, p.w, p.at = True, w, t
-                if c:
-                    c._log(t, "failed_open", plug=key, w=w, why="drawing power while held off")
-                    c._followup(t, "failed_open", True, plug=key, label=p.label, w=round(w))
+                self._off_but_drawing(p, w, t, m, c, "drawing power while held off")
                 return
             p.suspect_at = None
-        p.w, p.at = w, t
+        p.w, p.at = w, m
         if p.failed_open and w <= tm.off_w and p.relay == "off" and c:
             p.failed_open = False
             c._followup(t, "failed_open", False, plug=key)
@@ -1082,6 +1177,9 @@ class Engine:
                 c._followup(t, "restart_dry", False, plug=key)
 
     def on_command(self, key: str, action: str, ok: bool, t: float) -> None:
+        self._guarded(key, t, self._on_command, key, action, ok, t)
+
+    def _on_command(self, key: str, action: str, ok: bool, t: float) -> None:
         p = self._plug(key)
         c = self.circuit_of(key)
         if p.pending == action:
@@ -1099,7 +1197,9 @@ class Engine:
                 p.retried = True
                 self._send(t, p, "off")
             else:
-                p.zeroed, p.failed_open, p.shed_kind = False, True, None  # rule 4: evidence
+                # Rule 4: evidence. It counts again, but the engine remembers it meant to
+                # shed it: if the relay reports off later, that is a late confirm.
+                p.zeroed, p.failed_open = False, True
                 if c:
                     c._log(t, "failed_open", plug=key, w=p.w, why="off command failed twice")
                     c._followup(t, "failed_open", True, plug=key, label=p.label, w=round(p.w))
@@ -1128,6 +1228,9 @@ class Engine:
 
     def on_relay(self, key: str, state: str, t: float) -> None:
         """The plug's switch entity changed (on, off, unavailable)."""
+        self._guarded(key, t, self._on_relay, key, state, t)
+
+    def _on_relay(self, key: str, state: str, t: float) -> None:
         p = self._plug(key)
         if state not in ("on", "off"):
             self.on_reachable(key, False, t)
@@ -1139,9 +1242,17 @@ class Engine:
             return
         if p.zeroed and state == "off":
             return
+        c = self.circuit_of(key)
+        if state == "off" and p.relay == "on" and p.shed_kind and p.failed_open:
+            # The off command timed out but the relay did open: a late confirm.
+            p.relay, p.confirmed_at, p.failed_open = "off", t, False
+            p.zeroed, p.verify_sent, p.suspect_at = True, False, None
+            if c:
+                c._log(t, "shed_confirmed", plug=key, late=True)
+                c._followup(t, "failed_open", False, plug=key)
+            return
         if state == p.relay:
             return
-        c = self.circuit_of(key)
         was = p.shed_kind
         p.relay = state
         if c:
@@ -1161,6 +1272,8 @@ class Engine:
 
     def on_reachable(self, key: str, ok: bool, t: float) -> None:
         p = self._plug(key)
+        if not ok and p.available:
+            p.unavailable_at = t
         p.available = ok
         if ok:
             p.silent = False
@@ -1190,6 +1303,24 @@ class Engine:
 
     def on_feed(self, frame: dict[str, Any], t: float) -> None:
         """A feed frame from the link: {"printers": [{serial, state, value_mills, ...}]}."""
+        self._guarded(None, t, self._on_feed, frame, t)
+
+    def _guarded(self, key: str | None, t: float, fn: Callable[..., Any], *args: Any) -> Any:
+        """An exception in an input handler stops that circuit (failure mode 23)."""
+        try:
+            return fn(*args)
+        except Exception as err:  # noqa: BLE001
+            self.faults += 1
+            c = self.circuit_of(key) if key else None
+            if c is not None:
+                c.state = "OFF"
+                c._log(t, "fault", plug=key, error=type(err).__name__, detail=str(err)[:200])
+            else:
+                self._entry(t, "fault", None, key, None,
+                            {"error": type(err).__name__, "detail": str(err)[:200]})
+            return None
+
+    def _on_feed(self, frame: dict[str, Any], t: float) -> None:
         self.feed_at = t
         by_serial: dict[str, list[Plug]] = {}
         for p in self.plugs.values():
@@ -1208,9 +1339,6 @@ class Engine:
     def tick(self, t: float) -> None:
         self._last_t = t
         for c in list(self.circuits.values()):
-            if c.state == "OFF" and c.pending is None:
-                c.tick(t)
-                continue
             try:
                 c.tick(t)
             except Exception as err:  # noqa: BLE001 (failure mode 23: stop, never loop)
@@ -1234,6 +1362,10 @@ class Engine:
 
     # ---- people ------------------------------------------------------------------------
     def command(self, req: dict[str, Any], t: float) -> dict[str, Any]:
+        out = self._guarded(str(req.get("plug") or "").strip(), t, self._command, req, t)
+        return out or {"result": "refused", "reason": "Power protection hit an error. It is stopped on this circuit."}
+
+    def _command(self, req: dict[str, Any], t: float) -> dict[str, Any]:
         kind = req.get("kind")
         key = str(req.get("plug") or "").strip()
         if key not in self.plugs:
@@ -1261,6 +1393,8 @@ class Engine:
     # ---- what the link reads --------------------------------------------------------------
     def box(self, c: Circuit, t: float) -> dict[str, Any] | None:
         st = c.state
+        if not self.switching_allowed and st not in ("OFF",):
+            return {"state": "switching_off"}
         if st == "SHED":
             return {"state": "shedding"}
         if st == "LOCKOUT":
@@ -1313,6 +1447,7 @@ class Engine:
                            "rounds": c.rounds} if c.event_open else None),
                 "box": self.box(c, t),
                 "config_waiting": c.pending is not None,
+                "switching_off": not self.switching_allowed,
             })
         return {"circuits": circuits, "plugs": {k: self.plug_status(k, t) for k in self.plugs},
                 "feed_ok": t - self.feed_at <= self.tm.feed_stale_s,

@@ -61,7 +61,8 @@ class World:
                 w = self.true_w(key, t)
                 if self.last[key] is None or abs(w - self.last[key]) >= 1 or t - self.last_at[key] >= 30:
                     self.last[key], self.last_at[key] = w, t
-                    self.at(t + self.report_delay[key], lambda now, k=key, v=w: self.eng.on_power(k, v, now))
+                    self.at(t + self.report_delay[key],
+                            lambda now, k=key, v=w, m=t: self.eng.on_power(k, v, now, measured=m))
             while self.q and self.q[0][0] <= t:
                 _, _, fn = heapq.heappop(self.q)
                 fn(t)
@@ -136,3 +137,20 @@ def kinds(eng, kind):
 
 def followups(eng, kind=None):
     return [(t, d) for t, d in kinds(eng, "followup") if kind is None or d["kind"] == kind]
+
+
+def doc_engine(w, circuits, plugs, version=1):
+    """An engine set up from a config document, like production (lowercase addresses)."""
+    eng = Engine(w)
+    w.eng = eng
+    eng.apply_config(doc(circuits, plugs, version), 0)
+    return eng
+
+
+def doc(circuits, plugs, version=1):
+    cs = []
+    for c in circuits:
+        base = {"name": c["id"], "shed_w": 1440, "restore_w": 1080, "hard_w": 1800, "protect": True}
+        base.update(c)
+        cs.append(base)
+    return {"version": version, "circuits": cs, "plugs": plugs}

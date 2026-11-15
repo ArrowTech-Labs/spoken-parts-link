@@ -293,7 +293,10 @@ def test_switching_off_in_home_assistant_switches_nothing():
     eng.switching_allowed = False
     w.run(eng, 200, [p2_starts(eng)])
     assert eng.commands == []
-    assert eng.circuits["A"].state == "OVER" and followups(eng, "cant_protect")
+    c = eng.circuits["A"]
+    assert len(kinds(eng, "switching_off")) == 1, "one clear entry"
+    assert not kinds(eng, "trip") and not followups(eng, "cant_protect")
+    assert eng.box(c, 200) == {"state": "switching_off"}
 
 
 # ---- 4C ----------------------------------------------------------------------------------
