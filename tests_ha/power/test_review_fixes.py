@@ -203,7 +203,7 @@ def test_7_person_power_on_after_the_event_closed_returns_to_watch():
     w = World()
     w.add("P1", step((0, 300)))
     w.add("P3", step((0, 280)))
-    w.add("HEAT", step((0, 0), (40, 1100), (130, 0)))  # fix B: over the line for more than 60 s
+    w.add("HEAT", step((0, 0), (40, 1100), (130, 0)))
     eng = engine(w, [Plug("P1", "printer"), Plug("P3", "printer"), Plug("HEAT", "other")])
     eng.feed_plug("P1", "printing", 12400, 0)
     eng.feed_plug("P3", "printing", 1840, 0)

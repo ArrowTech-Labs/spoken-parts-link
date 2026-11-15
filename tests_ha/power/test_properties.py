@@ -85,9 +85,9 @@ def test_seven_rules_hold(seed):
         if k == "shed" and any(tier == 3 for _key, _w, tier in d["plugs"]):
             assert last_round <= 3, (seed, t)
 
-    # Fixes A and B: a printer (idle or printing) is cut only at a sacrifice decision
-    # that followed a re-read of every plug in the same round, on fresh readings over
-    # the shed line, and over the hard line or after 60 s over the shed line.
+    # Fix A/B (Q-40, Q-41): a printer (idle or printing) is cut only at a sacrifice
+    # decision that followed a re-read of every plug in the same round, on fresh
+    # readings over the shed line.
     refreshed = None
     for t, k, d in trace:
         if k == "trip":
@@ -99,7 +99,6 @@ def test_seven_rules_hold(seed):
             assert dec and refreshed is not None and refreshed <= t, (seed, t)
             dd = dec[-1][1]
             assert dd["verified_sum"] > 1440, (seed, t, dd)
-            assert dd["hard"] or dd["over_s"] >= 60, (seed, t, dd)
 
     # Rule 5: a print is cut only by a sacrifice decision on verified readings.
     sacrificed_at = {}

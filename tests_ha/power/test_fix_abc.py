@@ -6,8 +6,9 @@ about every 5 s, whatever the load does in between. A direct re-read answers in
 
 A. Before a printer is cut every plug is re-read, readings older than 5 s are
    dropped, and a printer is cut only if the circuit is still over the shed line.
-B. A printer may be cut only after 60 s over the shed line without a break, or
-   over the hard line on fresh readings. Heaters keep the fast 2 s trigger.
+B. (Marc, Q-41) No slower trigger. Before a printer is cut each plug is asked for
+   its draw right now (a direct Zigbee read); the cut happens only if the circuit
+   is really over the line on those readings.
 C. A heater in its heating session counts at its learned draw between pulses.
 """
 
@@ -98,8 +99,8 @@ def test_replay_1117_no_printer_is_cut_and_the_cycling_ams_goes_first():
     68 W); the H2D's calibration heat-up reports 1,206 W. The engine sees 1,528 W
     over the 1,440 W line for 2 s. The old engine skipped AMS-1 as "not drawing",
     kept the 4.6 s old X2D reading and cut the H2D. Now AMS-1 is counted at its
-    learned 148 W and goes at once (C); the printers wait (B); the X2D's next
-    report is 68 W, the circuit is under the line, and no printer is cut."""
+    learned 148 W and goes first (C); the printers are only cut after every plug is
+    read again (A/B), and the X2D answers 68 W: 1,303 W, under the line. No cut."""
     w = Cadence()
     ams = step((0, 4.2), (25, 148), (55, 4.2), (85, 148), (110, 4.2))
     x2d = step((0, 25), (40, 575), (45, 891), (50, 607), (53, 318), (57, 68))
@@ -119,8 +120,10 @@ def test_replay_1117_no_printer_is_cut_and_the_cycling_ams_goes_first():
     assert first[:3] == ["AMS1", 1, 148] and "between heating pulses" in first[4], first
     assert [k for _, k in offs(eng)] == ["AMS1"], offs(eng)
     assert eng.plugs["H2D"].relay == "on" and eng.plugs["X2D"].relay == "on"
-    assert kinds(eng, "printer_wait"), "the printers waited"
-    assert not kinds(eng, "sacrifice_decision"), "it never came to choosing a print"
+    ref = kinds(eng, "refresh")[0][1]
+    assert sorted(ref["plugs"]) == ["H2D", "X2D"], "every plug that is on is read again"
+    d = kinds(eng, "sacrifice_decision")[0][1]
+    assert d["verified_sum"] == 1235 + 68 and d["plugs"] == [] and d["outcome"] == "ok", d
 
 
 def test_replay_1421_hard_line_on_fresh_readings_still_cuts_the_starting_h2d():
@@ -149,17 +152,19 @@ def test_replay_1421_hard_line_on_fresh_readings_still_cuts_the_starting_h2d():
     assert kinds(eng, "trip")[0][1]["skipped"] == [["AMS1", "not drawing"]], "C: idle AMS is not counted"
 
 
-def test_replay_1421_with_the_same_load_just_under_the_hard_line_waits_60_s():
-    """The same 2:21 PM case 100 W lighter (1,748 W): over the shed line only, so the
-    H2D is cut only after 60 s over the line, and its 30 s heat-up is over by then."""
+def test_replay_1421_over_the_shed_line_on_fresh_readings_cuts_at_once():
+    """The same 2:21 PM case 100 W lighter (1,748 W): really over the shed line on the
+    fresh readings, so the starting H2D is cut without a slower trigger (Q-41)."""
     w = Cadence()
     x2d = step((0, 466))
     h2d = step((0, 48), (30, 1282), (60, 300))
     eng = _upstairs(w, h2d, x2d, ams_cycle(stop=0.0))
     eng.feed_plug("X2D", "printing", 0, 0)
     w.run(eng, 200, [(10, lambda now: eng.feed_plug("H2D", "starting", 0, now))])
-    assert not offs(eng), offs(eng)
-    assert kinds(eng, "printer_wait"), "the engine says it is waiting"
+    off = offs(eng)
+    assert [k for _, k in off] == ["H2D"] and off[0][0] < 36, off
+    d = kinds(eng, "sacrifice_decision")[0][1]
+    assert d["verified_sum"] == 1748 and d["hard"] is False, d
 
 
 # ---- A: fresh re-read --------------------------------------------------------------------
@@ -217,7 +222,7 @@ def test_A_a_plug_that_does_not_answer_counts_only_if_its_reading_is_under_5_s_o
 # ---- B: slow trigger for printers ---------------------------------------------------------
 
 
-def test_B_heater_goes_at_once_printer_only_after_60_s_over_the_line():
+def test_B_heater_first_then_the_printer_on_fresh_readings_without_waiting():
     w = Cadence(gap=5.0)
     w.add("HT", step((0, 150)), phase=0.5)
     w.add("P1", step((0, 700)), phase=1.0)
@@ -228,25 +233,24 @@ def test_B_heater_goes_at_once_printer_only_after_60_s_over_the_line():
     w.run(eng, 200)
     off = offs(eng)
     assert [k for _, k in off] == ["HT", "P2"], off
-    over_at = 22.1  # P2's first 900 W report arrives
-    assert off[0][0] < over_at + 3, "the heater keeps the 2 s trigger"
-    assert off[1][0] >= over_at + 60, "the printer waits 60 s"
-    assert off[1][0] < over_at + 66
-    wait = kinds(eng, "printer_wait")
-    assert len(wait) == 1 and wait[0][1]["wait_s"] == 60.0, wait
+    assert off[0][0] < 22.1 + 3 and off[1][0] - off[0][0] <= 1.0, "same round, no slower trigger"
+    assert not kinds(eng, "printer_wait")
 
 
-def test_B_a_dip_under_the_shed_line_starts_the_60_s_over():
-    """Over for 50 s, one reading under the line, over for 50 s again: no printer cut."""
+def test_B_every_plug_is_asked_and_the_answers_are_waited_for():
+    """The decision waits for every plug's direct read (here 0.3 s), not a fixed delay."""
     w = Cadence(gap=5.0)
     w.add("P1", step((0, 700)), phase=0.0)
-    w.add("P2", step((0, 15), (10, 900), (60, 600), (65, 900), (115, 15)), phase=0.0)
+    w.add("P2", step((0, 15), (10, 900)), phase=0.0)
     eng = engine(w, [Plug("P1", "printer"), Plug("P2", "printer")])
     eng.feed_plug("P1", "printing", 5000, 0)
     eng.feed_plug("P2", "starting", 0, 0)
-    w.run(eng, 200)
-    assert not offs(eng), offs(eng)
-    assert len(kinds(eng, "printer_wait")) == 1, "at most one entry every 5 min"
+    w.run(eng, 40)
+    ref = kinds(eng, "refresh")[0]
+    d = kinds(eng, "sacrifice_decision")[0]
+    assert sorted(ref[1]["plugs"]) == ["P1", "P2"]
+    assert d[1]["answered"] is True and d[0] - ref[0] <= 0.5, (ref, d)
+    assert [k for _, k in offs(eng)] == ["P2"]
 
 
 def test_B_hard_line_cuts_a_printer_at_once_on_fresh_readings():
@@ -301,10 +305,9 @@ def test_C_heater_without_a_learned_draw_is_still_skipped_when_idle():
 
 
 def test_review_1_no_cut_decisions_do_not_use_up_the_rounds():
-    """A real 1,700 W overload whose reading spikes over the hard line every 10 s.
-    Each spike trips the hard line, the fresh re-read is under it, and the engine
-    waits. Those decisions cut nothing, so they must not use up the 3 rounds: after
-    60 s over the shed line the cheaper print is cut."""
+    """A real 1,700 W overload whose reading also spikes over the hard line every 10 s.
+    It is cut on the fresh readings and the circuit never ends in OVER (decisions
+    that cut nothing do not use up the 3 rounds)."""
     w = Cadence(gap=5.0)
     w.add("P1", step((0, 700)), phase=0.5)
     w.add("P2", lambda t: 1150.0 if (t % 10) < 0.5 and t >= 10 else 1000.0, phase=0.0)
@@ -340,7 +343,7 @@ def test_review_2_a_plug_that_cannot_be_reached_still_flags_the_circuit():
     its old reading, and a person is asked (OVER, cant_protect)."""
     w = Cadence(gap=5.0)
     w.add("P1", step((0, 700)), phase=0.5)
-    w.add("P2", step((0, 60), (5, 1000)), phase=0.0)
+    w.add("P2", step((0, 60), (30, 1000)), phase=0.0)
     eng = engine(w, [Plug("P1", "printer"), Plug("P2", "printer")])
     eng.feed_plug("P1", "printing", 5000, 0)
     eng.feed_plug("P2", "printing", 900, 0)
@@ -353,18 +356,6 @@ def test_review_2_a_plug_that_cannot_be_reached_still_flags_the_circuit():
     assert not offs(eng)
     assert eng.circuits["A"].state == "OVER"
     assert any(d["outcome"] == "unverified_over" for _, d in kinds(eng, "sacrifice_decision"))
-
-
-def test_review_3_hovering_at_the_line_writes_few_printer_wait_entries():
-    w = Cadence(gap=5.0)
-    w.add("P1", step((0, 700)), phase=0.0)
-    w.add("P2", lambda t: 760.0 if int(t // 5) % 2 else 700.0, phase=0.0)
-    eng = engine(w, [Plug("P1", "printer"), Plug("P2", "printer")])
-    eng.feed_plug("P1", "printing", 5000, 0)
-    eng.feed_plug("P2", "printing", 900, 0)
-    w.run(eng, 3600)
-    assert not offs(eng)
-    assert len(kinds(eng, "printer_wait")) <= 13, len(kinds(eng, "printer_wait"))
 
 
 def test_review_2b_slow_reporter_that_never_answers_is_not_phase_locked():
@@ -385,12 +376,12 @@ def test_review_2b_slow_reporter_that_never_answers_is_not_phase_locked():
 
 
 def test_review_4_a_printing_plug_lost_from_zigbee_does_not_loop_the_journal():
-    """P2 (printing, 900 W) drops off Zigbee; its old reading keeps the sum over the
-    line. No print is cut on it (rule 5) and the circuit is flagged once; the engine
-    does not trip again every few seconds while nothing changes."""
+    """P2 (printing, 600 W) drops off Zigbee; then P1 rises and its old reading keeps
+    the sum over the line. No print is cut on it (rule 5) and the circuit is flagged
+    once; the engine does not trip again every few seconds while nothing changes."""
     w = Cadence(gap=5.0)
-    w.add("P1", step((0, 700)), phase=0.5)
-    w.add("P2", step((0, 900)), phase=1.0)
+    w.add("P1", step((0, 700), (30, 900)), phase=0.5)
+    w.add("P2", step((0, 600)), phase=1.0)
     w.add("P3", step((0, 80)), phase=1.5)
     eng = engine(w, [Plug("P1", "printer"), Plug("P2", "printer"), Plug("P3", "printer")])
     eng.feed_plug("P1", "printing", 5000, 0)
@@ -412,18 +403,19 @@ def test_recheck_from_over_stays_over():
     """A recheck that starts in OVER goes back to OVER (it never re-enables print cuts)."""
     w = Cadence(gap=5.0)
     w.add("P1", step((0, 700)), phase=0.5)
-    w.add("P2", step((0, 900)), phase=1.0)
+    w.add("P2", step((0, 600), (40, 900)), phase=1.0)
     w.add("P3", step((0, 80)), phase=1.5)
     eng = engine(w, [Plug("P1", "printer"), Plug("P2", "printer"), Plug("P3", "printer")])
     eng.feed_plug("P1", "printing", 5000, 0)
     eng.feed_plug("P2", "printing", 900, 0)
     eng.feed_plug("P3", "idle", None, 0)
-    w.run(eng, 20)
+    w.run(eng, 30)
     c = eng.circuits["A"]
-    c.state, c.over_since = "OVER", 0.0
+    c.state = "OVER"
     w.unanswered.add("P1")
     w.muted.add("P1")
-    w.run(eng, 100, start=20.25)
+    w.run(eng, 100, start=30.25)
+    assert any(d["outcome"] == "recheck" for _, d in kinds(eng, "sacrifice_decision"))
     assert c.state == "OVER"
     assert not [k for _, k in offs(eng) if k in ("P1", "P2")]
 
@@ -434,7 +426,7 @@ def test_review_5_the_gate_never_holds_back_an_overload_the_other_plugs_show():
     print is cut at once, not after P1 is marked silent."""
     w = Cadence(gap=5.0)
     w.add("P1", step((0, 700)), phase=0.5)
-    w.add("P2", step((0, 60), (5, 1000)), phase=0.0)
+    w.add("P2", step((0, 60), (60, 1000)), phase=0.0)
     w.add("P3", step((0, 15), (80, 900)), phase=0.25)
     eng = engine(w, [Plug("P1", "printer"), Plug("P2", "printer"), Plug("P3", "printer")])
     eng.feed_plug("P1", "printing", 5000, 0)
@@ -452,3 +444,5 @@ def test_review_5_the_gate_never_holds_back_an_overload_the_other_plugs_show():
     assert any(d["outcome"] == "recheck" for _, d in kinds(eng, "sacrifice_decision"))
     off = offs(eng)
     assert [k for _, k in off] == ["P3"] and off[0][0] < 90, off
+
+

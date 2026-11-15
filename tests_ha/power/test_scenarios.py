@@ -318,8 +318,8 @@ def _four_c(w):
 
 
 def test_4c_printing_one_stays_off():
-    """Fix B: HT1 goes at once; the prints wait 60 s over the line. Then the
-    starting print (value 0) is cut on fresh readings; the idle P3 is not needed."""
+    """HT1 goes first; then every plug is read again and the starting print (value 0)
+    is cut on the fresh readings; the idle P3 is not needed."""
     w = World()
     eng = _four_c(w)
     script = [(60, lambda now: eng.feed_plug("P2", "starting", 0, now, high_until=now + 300)),
@@ -327,16 +327,14 @@ def test_4c_printing_one_stays_off():
     w.run(eng, 1200, script)
     off = offs(eng)
     assert [k for _, k in off] == ["HT1", "P2"], off
-    assert off[0][0] < 65, "the heater keeps the fast trigger"
-    assert off[1][0] >= 60 + 60, "a printer waits 60 s over the shed line"
+    assert off[0][0] < 65 and off[1][0] - off[0][0] <= 2.0, "same round, after the re-read"
     assert eng.plugs["P2"].shed_kind == "sacrifice" and eng.plugs["P3"].relay == "on"
     assert [k for _, k in ons(eng)] == ["HT1"], "never the printing one"
     assert eng.plugs["P2"].relay == "off"
-    assert kinds(eng, "printer_wait")
 
 
 def test_4c_idle_printer_comes_back_after_the_heaters():
-    """HT1 (200 W) is not enough; after 60 s the idle P3 is enough, so no print is cut.
+    """HT1 (200 W) is not enough; the idle P3 is enough, so no print is cut.
     Both come back by themselves, heater first."""
     w = World()
     w.add("HT1", step((0, 200)))
@@ -352,7 +350,7 @@ def test_4c_idle_printer_comes_back_after_the_heaters():
     w.run(eng, 1200, script)
     off = offs(eng)
     assert [k for _, k in off] == ["HT1", "P3"], off
-    assert off[1][0] >= 120, "an idle printer is a printer: it waits for the slow trigger"
+    assert kinds(eng, "refresh"), "an idle printer is only cut after the re-read"
     assert [k for _, k in ons(eng)] == ["HT1", "P3"], "heater first, then the idle printer"
     assert [d["open"] for _, d in followups(eng, "idle_off")] == [True, False]
     assert not followups(eng, "sacrificed")
@@ -362,7 +360,7 @@ def test_4c_person_power_on_is_refused_without_room_and_done_with_room():
     w = World()
     eng = _four_c(w)
     script = [(60, lambda now: eng.feed_plug("P2", "starting", 0, now, high_until=now + 300))]
-    w.run(eng, 130, script)  # fix B: the print is cut 60 s after the circuit went over
+    w.run(eng, 130, script)
     c = eng.circuits["A"]
     assert eng.plugs["P2"].shed_kind == "sacrifice"
     # Pretend the circuit is busy: P1 now draws a lot, so P2 (expected ~60 W idle) has no room.
