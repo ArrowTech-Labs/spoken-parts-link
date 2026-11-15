@@ -124,6 +124,7 @@ func (f *fakeEngine) Call(_ context.Context, typ string, data map[string]any) (j
 			"engine":   map[string]any{"id": "e-1", "version": "0.1.0", "config_version": f.config},
 			"circuits": []any{map[string]any{"id": "c1", "state": "WATCH"}},
 			"plugs":    []any{map[string]any{"ieee": "00:0d"}, map[string]any{"ieee": "00:0e"}},
+			"errors":   []any{"Circuit B: the restore line must be under the shed line"},
 		}
 	case "spoken_parts_power/config":
 		f.config = 7
@@ -306,5 +307,28 @@ func TestOldBackendBacksOff(t *testing.T) {
 	r.Step(context.Background())
 	if len(a.syncs) != 1 {
 		t.Fatalf("retried a 404 after a minute: %d", len(a.syncs))
+	}
+}
+
+func TestSyncCarriesEngineConfigErrors(t *testing.T) {
+	eng := &fakeEngine{}
+	a := &fakeAPI{}
+	now := t0
+	r := newRunner(t, eng, a, &now, "")
+	r.Step(context.Background())
+	var e struct {
+		ID     string   `json:"id"`
+		Errors []string `json:"errors"`
+	}
+	if err := json.Unmarshal(a.syncs[0].Engine, &e); err != nil {
+		t.Fatal(err)
+	}
+	if e.ID != "e-1" || len(e.Errors) != 1 || !strings.Contains(e.Errors[0], "restore line") {
+		t.Fatalf("engine %s", a.syncs[0].Engine)
+	}
+	// An engine that already sends engine.errors is passed on as it is.
+	got := withErrors(json.RawMessage(`{"id":"e","errors":["x"]}`), []string{"y"})
+	if string(got) != `{"id":"e","errors":["x"]}` {
+		t.Fatalf("%s", got)
 	}
 }

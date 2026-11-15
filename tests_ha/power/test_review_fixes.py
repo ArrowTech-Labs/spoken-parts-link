@@ -319,3 +319,42 @@ def test_12_booked_watts_are_never_verified_readings():
     p.w, p.at, p.booked_w, p.booked_until = 0.0, 10.0, 500.0, 100.0
     c = eng.circuits["A"]
     assert c.total(11) == 500 and c.total(11, verified_only=True) == 0
+
+
+# A (cross-repo check) --------------------------------------------------------------------
+def test_A_blind_upgrades_to_no_power_when_plugs_fall_silent_one_after_another():
+    w = World()
+    keys = ["H1", "H2", "H3", "H4", "H5"]
+    for k in keys:
+        w.add(k, step((0, 100)))
+    eng = engine(w, [Plug(k, "ams_ht", peak_w=100) for k in keys])
+    script = []
+    for i, k in enumerate(keys):  # staggered: 30 s apart
+        def gone(now, k=k):
+            w.silent.add(k)
+            eng.on_reachable(k, False, now)
+        script.append((100 + 30 * i, gone))
+
+    def back(now):
+        w.silent.discard("H1")
+        eng.on_reachable("H1", True, now)
+
+    script.append((400, back))
+    w.run(eng, 420, script)
+    reasons = [d["reason"] for _, d in kinds(eng, "blind")]
+    assert reasons[0] == "lost_contact" and "no_power" in reasons, reasons
+    nop = followups(eng, "no_power")
+    assert [d["open"] for _, d in nop] == [True, False], nop
+    assert nop[0][0] >= 220, "opened only once every plug was gone"
+    assert reasons[-1] == "lost_contact"
+
+
+# B (cross-repo check) --------------------------------------------------------------------
+def test_B_rejected_circuit_is_reported_in_status_errors():
+    eng = Engine(Act())
+    d = doc([{"id": "A"}, {"id": "B", "restore_w": 1500}],
+            [{"ieee": "h", "role": "ams_ht", "circuit": "A"}])
+    res = eng.apply_config(d, 0)
+    assert res["errors"] and "B" not in eng.circuits and "A" in eng.circuits
+    st = eng.status(1)
+    assert st["config_version"] == 1 and any("restore line" in e for e in st["errors"])

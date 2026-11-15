@@ -300,6 +300,8 @@ class PowerRuntime:
             "feed_ok": time.monotonic() - self.engine.feed_at <= self.engine.tm.feed_stale_s,
             "ok": self.ok(),
             "faults": self.engine.faults,
+            # Circuits the engine refused from the last config (short reasons).
+            "errors": [str(e)[:200] for e in self.engine.config_errors][:20],
         }
 
     def status(self) -> dict[str, Any]:

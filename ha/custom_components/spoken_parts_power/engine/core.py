@@ -452,6 +452,19 @@ class Circuit:
                 self._log(t, "armed", state=self.state, sum=round(self.total(t)),
                           waited_s=round(t - self.started_at, 1), all_fresh=fresh)
         elif st == "BLIND":
+            ps = list(self.plugs.values())
+            all_gone = len(ps) >= 2 and all(not p.reachable for p in ps)
+            if all_gone and self.blind_reason != "no_power":
+                # Plugs fell silent one after another: now every one is gone.
+                self.blind_reason = "no_power"
+                self._log(t, "blind", why="every plug on this circuit stopped answering",
+                          reason="no_power")
+                self._followup(t, "no_power", True)
+            elif not all_gone and self.blind_reason == "no_power":
+                self.blind_reason = "lost_contact"  # one answers again: not a dead circuit
+                self._followup(t, "no_power", False)
+                self._log(t, "blind", why="more than half of the plugs are not reachable",
+                          reason="lost_contact")
             if not self._blind(t):
                 self._log(t, "starting", why="plugs are back")
                 if self.blind_reason == "no_power":

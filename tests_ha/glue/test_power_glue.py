@@ -134,6 +134,7 @@ async def test_inventory_hello_config_and_a_real_shed(hass: HomeAssistant, zha, 
     client = await hass_ws_client(hass)
     hello = await ws(client, type="spoken_parts_power/hello")
     assert hello["id"].startswith("e-") and hello["switching_allowed"] is True
+    assert hello["errors"] == []
     res = await ws(client, type="spoken_parts_power/config", config=config())
     assert res["version"] == 3
     assert not rt.engine.plugs[TUYA].controllable
@@ -222,4 +223,18 @@ async def test_reading_marks_plug_reachable_and_measured_time_is_used(hass: Home
     hass.states.async_set("sensor.ams_ht_plug_power", "120", {"unit_of_measurement": "W"})
     await hass.async_block_till_done()
     assert rt.engine.plugs[HT].reachable and rt.engine.plugs[HT].w == 120
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
+async def test_hello_and_status_carry_config_errors(hass: HomeAssistant, zha, hass_ws_client) -> None:
+    entry = await setup(hass)
+    client = await hass_ws_client(hass)
+    bad = config()
+    bad["circuits"].append({"id": "b", "name": "B", "shed_w": 1440, "restore_w": 1500,
+                            "hard_w": 1800})
+    await ws(client, type="spoken_parts_power/config", config=bad)
+    hello = await ws(client, type="spoken_parts_power/hello")
+    assert any("restore line" in e for e in hello["errors"])
+    st = await ws(client, type="spoken_parts_power/status")
+    assert st["engine"]["errors"] == hello["errors"]
     await hass.config_entries.async_unload(entry.entry_id)

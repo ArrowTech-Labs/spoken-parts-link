@@ -419,13 +419,40 @@ type statusAnswer struct {
 	Engine   json.RawMessage `json:"engine"`
 	Circuits json.RawMessage `json:"circuits"`
 	Plugs    json.RawMessage `json:"plugs"`
+	Errors   []string        `json:"errors"`
+}
+
+// withErrors puts the engine's config errors (circuits it refused) into the engine
+// object as engine.errors, short strings, at most 20, unless it already has them.
+func withErrors(engine json.RawMessage, errs []string) json.RawMessage {
+	var m map[string]json.RawMessage
+	if json.Unmarshal(engine, &m) != nil || m == nil {
+		return engine
+	}
+	if _, ok := m["errors"]; ok {
+		return engine
+	}
+	out := make([]string, 0, len(errs))
+	for i, e := range errs {
+		if i >= 20 {
+			break
+		}
+		out = append(out, cut(e, 200))
+	}
+	b, _ := json.Marshal(out)
+	m["errors"] = b
+	merged, err := json.Marshal(m)
+	if err != nil {
+		return engine
+	}
+	return merged
 }
 
 func (r *Runner) sync(ctx context.Context, gen uint64) {
 	var st statusAnswer
 	err := r.call(ctx, "spoken_parts_power/status", nil, &st)
 	r.setEngine(err)
-	req := api.PowerSyncRequest{Engine: st.Engine, Circuits: st.Circuits, Plugs: st.Plugs}
+	req := api.PowerSyncRequest{Engine: withErrors(st.Engine, st.Errors), Circuits: st.Circuits, Plugs: st.Plugs}
 	var engineVersion string
 	var engineConfig int
 	if err != nil {
