@@ -203,7 +203,7 @@ def test_7_person_power_on_after_the_event_closed_returns_to_watch():
     w = World()
     w.add("P1", step((0, 300)))
     w.add("P3", step((0, 280)))
-    w.add("HEAT", step((0, 0), (40, 1100), (60, 0)))
+    w.add("HEAT", step((0, 0), (40, 1100), (130, 0)))  # fix B: over the line for more than 60 s
     eng = engine(w, [Plug("P1", "printer"), Plug("P3", "printer"), Plug("HEAT", "other")])
     eng.feed_plug("P1", "printing", 12400, 0)
     eng.feed_plug("P3", "printing", 1840, 0)
@@ -297,19 +297,19 @@ def test_12_restores_strictly_heaters_first():
     w.add("HT1", step((0, 200)))
     w.add("P3", step((0, 300)))
     w.add("P1", step((0, 300)))
-    w.add("P2", step((0, 15), (60, 1250)))
+    w.add("P2", step((0, 15), (60, 850), (200, 250)))
     eng = engine(w, [Plug("HT1", "ams_ht", peak_w=200), Plug("P3", "printer"), Plug("P1", "printer"),
                      Plug("P2", "printer")])
     eng.feed_plug("P3", "idle", None, 0)
     eng.feed_plug("P1", "printing", 300, 0)
     eng.feed_plug("P2", "idle", None, 0)
-    w.run(eng, 70, [(60, lambda now: eng.feed_plug("P2", "starting", 0, now, high_until=now + 5))])
-    assert sorted(k for _, k in offs(eng)) == ["HT1", "P2", "P3"]
+    w.run(eng, 130, [(60, lambda now: eng.feed_plug("P2", "starting", 0, now, high_until=now + 5))])
+    assert sorted(k for _, k in offs(eng)) == ["HT1", "P3"]
     eng.plugs["HT1"].hold_mult = 2
-    w.run(eng, 900, start=70.25)
+    w.run(eng, 900, start=130.25)
     on = ons(eng)
     assert [k for _, k in on] == ["HT1", "P3"], on
-    assert on[0][0] >= 70 + 240 - 10, on
+    assert on[0][0] >= 200 + 240 - 10, on
 
 
 def test_12_booked_watts_are_never_verified_readings():

@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.7.1
+
+- Power protection no longer turns a printer off for a short power spike.
+  After two wrong cuts of an H2D on Nov 15, 2026, the Spoken Parts Power
+  integration (0.1.1) changes three things:
+  - Before a printer is turned off, every plug on the circuit is read again.
+    Readings older than 5 seconds no longer count, and the printer stays on if
+    the fresh readings are under the shed line.
+  - A printer is turned off only after the circuit has been over the shed line
+    for 60 seconds without a break (or at once over the hard line). AMS HT
+    heaters and dryers still go after the circuit's short trip filter.
+  - An AMS HT or dryer that is drying counts at its usual draw even between
+    its heating pulses, so it is always turned off before any printer.
+- The link app itself is unchanged.
+
 ## 0.7.0
 
 - Power protection. Spoken Parts can now protect a breaker by turning smart
