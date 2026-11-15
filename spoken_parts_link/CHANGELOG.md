@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.1
+
+- Fixes camera pictures. In 0.6.0 and earlier, every camera picture failed
+  with "cannot run ffmpeg (no such file or directory)": the app's image has no
+  /tmp folder, and the link started ffmpeg in it. ffmpeg now starts in the
+  image's root folder, and the image has an empty /tmp. Printers whose camera
+  is on in Spoken Parts send pictures again.
+- Nothing else changes. ffmpeg still only reads the camera frame on stdin and
+  writes the picture to stdout, with no address, access code or environment.
+  Nothing new is sent to the printers.
+
 ## 0.6.0
 
 - Reports each AMS unit's humidity, humidity level, temperature and drying

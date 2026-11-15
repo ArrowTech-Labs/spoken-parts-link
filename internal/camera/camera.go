@@ -3,7 +3,8 @@
 // process) turned into a JPEG by ffmpeg.
 //
 // ffmpeg reads the Annex-B bytes on stdin and writes the JPEG on stdout. Its
-// argv is fixed (no URL, no secret) and its environment is empty. The JPEG
+// argv is fixed (no URL, no secret), its environment is empty and it runs in
+// FFmpegDir ("/"), never in os.TempDir(). The JPEG
 // is checked and stripped of every APPn segment but APP0 JFIF, and of
 // comments, so no EXIF or other metadata leaves the device.
 package camera
@@ -37,6 +38,14 @@ const (
 	maxWidth       = 4096
 	stderrInErrMax = 200
 )
+
+// FFmpegDir is ffmpeg's working directory. It exists in every image,
+// including the scratch app image, which had no /tmp until 0.6.1: with
+// cmd.Dir = os.TempDir() the chdir to /tmp failed before ffmpeg started
+// ("cannot run ffmpeg (no such file or directory)") and no camera frame was
+// ever made. ffmpeg reads stdin and writes stdout only, so it needs no
+// writable directory, and uid 65532 cannot write to "/".
+const FFmpegDir = "/"
 
 // Errors.
 var (
@@ -121,7 +130,7 @@ func toJPEG(ctx context.Context, ffmpeg string, annexB []byte, width int, run Ru
 	defer cancel()
 	cmd := exec.CommandContext(ctx, ffmpeg, Args(width)...)
 	cmd.Env = []string{} // nothing inherited
-	cmd.Dir = os.TempDir()
+	cmd.Dir = FFmpegDir  // not os.TempDir(): $TMPDIR or /tmp may not exist
 	cmd.Stdin = bytes.NewReader(annexB)
 	out := &limited{max: MaxJPEG}
 	errb := &limited{max: maxStderr}

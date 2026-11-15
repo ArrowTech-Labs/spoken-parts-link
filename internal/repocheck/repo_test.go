@@ -114,7 +114,7 @@ func TestConfigYAML(t *testing.T) {
 	m := topLevel(s)
 	want := map[string]string{
 		"name":           `"Spoken Parts Link"`,
-		"version":        `"0.6.0"`,
+		"version":        `"0.6.1"`,
 		"slug":           "spoken_parts_link",
 		"url":            `"https://github.com/ArrowTech-Labs/spoken-parts-link"`,
 		"image":          `"ghcr.io/arrowtech-labs/spoken-parts-link"`,
@@ -226,6 +226,8 @@ func TestDockerfile(t *testing.T) {
 		`org.opencontainers.image.licenses="PolyForm-Shield-1.0.0"`,
 		"FROM scratch", "/etc/ssl/certs/ca-certificates.crt",
 		"COPY --from=ffmpeg /rootfs/usr/bin/ffmpeg /usr/bin/ffmpeg", "--no-scripts", `"ffmpeg=${FFMPEG_VERSION}"`,
+		// 0.6.1: scratch has no /tmp, and 0.6.0's camera failed for lack of one.
+		"chmod 1777 /out/root/tmp", "COPY --from=build /out/root/ /",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("Dockerfile lacks %q", want)
