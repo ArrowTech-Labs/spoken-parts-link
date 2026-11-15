@@ -188,7 +188,7 @@ def test_A_a_plug_that_does_not_answer_counts_only_if_its_reading_is_under_5_s_o
     """The X2D stops reporting and does not answer the re-read. Its last 700 W is
     4.5 s old at the hard-line trip (it counted as current before the fix) and over
     5 s at the decision: it is dropped. The fresh total is under the shed line, so no
-    printer is cut; after three more looks the circuit is flagged (unverified_over)."""
+    printer is cut; once it is marked not reachable the circuit is flagged."""
     w = Cadence(gap=5.0)
     w.add("H2D", step((0, 48), (9.5, 1300)), phase=4.5)
     w.add("X2D", step((0, 700)), phase=0.5)
@@ -200,15 +200,17 @@ def test_A_a_plug_that_does_not_answer_counts_only_if_its_reading_is_under_5_s_o
     def mute(now):
         w.muted.add("X2D")
 
-    w.run(eng, 90, [(6.0, mute)])
+    w.run(eng, 150, [(6.0, mute)])
     trip = kinds(eng, "trip")[0]
     assert trip[1]["line"] == "hard" and 4.0 < trip[0] - 5.5 < 5.0, trip
     decs = kinds(eng, "sacrifice_decision")
     d = decs[0][1]
     assert "X2D" in d["unverified"] and d["answered"] is False and d["waited_s"] >= 1.9, d
     assert d["verified_sum"] == 1300 and d["plugs"] == [], d
-    # It answers nothing and reports nothing: three more looks, then a person is asked.
-    assert [x["outcome"] for _, x in decs] == ["recheck"] * 3 + ["unverified_over"], decs
+    # It answers nothing and reports nothing: no new look until it is marked not
+    # reachable (silent 90 s), then a person is asked. No entry loop meanwhile.
+    assert [x["outcome"] for _, x in decs] == ["recheck", "unverified_over"], decs
+    assert decs[1][0] > 5.5 + 90, decs
     assert not offs(eng)
 
 
@@ -363,3 +365,64 @@ def test_review_3_hovering_at_the_line_writes_few_printer_wait_entries():
     w.run(eng, 3600)
     assert not offs(eng)
     assert len(kinds(eng, "printer_wait")) <= 13, len(kinds(eng, "printer_wait"))
+
+
+def test_review_2b_slow_reporter_that_never_answers_is_not_phase_locked():
+    """A real 1,700 W overload. P1 reports every 6, 7 or 8 s and never answers a
+    re-read. The print is cut at every phase; the circuit never latches OVER."""
+    for gap in (6.0, 7.0, 8.0):
+        for ph in [x * 0.5 for x in range(int(gap * 2))]:
+            w = Cadence(gap=gap)
+            w.add("P1", step((0, 700)), phase=ph)
+            w.add("P2", step((0, 60), (5, 1000)), phase=0.25)
+            w.unanswered.add("P1")
+            eng = engine(w, [Plug("P1", "printer"), Plug("P2", "printer")])
+            eng.feed_plug("P1", "printing", 5000, 0)
+            eng.feed_plug("P2", "printing", 900, 0)
+            w.run(eng, 200)
+            assert [k for _, k in offs(eng)] == ["P2"], (gap, ph, kinds(eng, "sacrifice_decision"))
+            assert eng.circuits["A"].state != "OVER", (gap, ph)
+
+
+def test_review_4_a_printing_plug_lost_from_zigbee_does_not_loop_the_journal():
+    """P2 (printing, 900 W) drops off Zigbee; its old reading keeps the sum over the
+    line. No print is cut on it (rule 5) and the circuit is flagged once; the engine
+    does not trip again every few seconds while nothing changes."""
+    w = Cadence(gap=5.0)
+    w.add("P1", step((0, 700)), phase=0.5)
+    w.add("P2", step((0, 900)), phase=1.0)
+    w.add("P3", step((0, 80)), phase=1.5)
+    eng = engine(w, [Plug("P1", "printer"), Plug("P2", "printer"), Plug("P3", "printer")])
+    eng.feed_plug("P1", "printing", 5000, 0)
+    eng.feed_plug("P2", "printing", 900, 0)
+    eng.feed_plug("P3", "idle", None, 0)
+
+    def drop(now):
+        w.silent.add("P2")
+        eng.on_reachable("P2", False, now)
+
+    w.run(eng, 3600, [(10, drop)])
+    assert not offs(eng)
+    assert eng.circuits["A"].state == "OVER"
+    assert len(kinds(eng, "trip")) <= 2, len(kinds(eng, "trip"))
+    assert len(eng.journal.items) < 100, len(eng.journal.items)
+
+
+def test_recheck_from_over_stays_over():
+    """A recheck that starts in OVER goes back to OVER (it never re-enables print cuts)."""
+    w = Cadence(gap=5.0)
+    w.add("P1", step((0, 700)), phase=0.5)
+    w.add("P2", step((0, 900)), phase=1.0)
+    w.add("P3", step((0, 80)), phase=1.5)
+    eng = engine(w, [Plug("P1", "printer"), Plug("P2", "printer"), Plug("P3", "printer")])
+    eng.feed_plug("P1", "printing", 5000, 0)
+    eng.feed_plug("P2", "printing", 900, 0)
+    eng.feed_plug("P3", "idle", None, 0)
+    w.run(eng, 20)
+    c = eng.circuits["A"]
+    c.state, c.over_since = "OVER", 0.0
+    w.unanswered.add("P1")
+    w.muted.add("P1")
+    w.run(eng, 100, start=20.25)
+    assert c.state == "OVER"
+    assert not [k for _, k in offs(eng) if k in ("P1", "P2")]

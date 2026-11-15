@@ -73,9 +73,6 @@ class Timers:
     # Fix C: a heater that drew restart_dry_w within this long is still in its
     # heating session, so it counts at its learned draw between pulses.
     heater_session_s: float = 180.0
-    # Fix A: a reachable plug that missed its re-read gets this many more looks in
-    # an event before the circuit is flagged as unverified (OVER).
-    recheck_max: int = 3
     printer_wait_log_s: float = 300.0  # at most one printer_wait entry this often
     lockout_min_s: float = 3.0
     lockout_max_s: float = 10.0
@@ -332,10 +329,13 @@ class Circuit:
         self.over_since: float | None = None  # fix B: over the shed line continuously since
         self.wait_logged = False  # fix B: one printer_wait entry per stretch over the line
         self.wait_log_at = -1e9
-        self.rechecks = 0  # fix A: decisions in this event that waited for a missed re-read
+        # Fix A: after a decision that could not check some plugs, the printer path waits
+        # until one of them has something new (a reading, or it went unreachable).
+        self.wait_for: dict[str, tuple[float, bool]] = {}
         self.refresh_at: float | None = None  # fix A: when the pre-cut re-read went out
         self.refresh_keys: list[str] = []
         self.shot_tier = 3  # the highest tier this round's decision may cut
+        self.shot_from = "WATCH"  # the state the printer path started from
 
     # ---- sums ---------------------------------------------------------------------
     @staticmethod
@@ -484,7 +484,7 @@ class Circuit:
             if self.over_since is None:
                 self.over_since = t
         else:
-            self.over_since, self.wait_logged = None, False
+            self.over_since, self.wait_logged, self.wait_for = None, False, {}
         if self.state == "OFF":
             return
         if self.state in ("HOLD", "RESTORE", "OVER"):  # the calm clock
@@ -659,7 +659,12 @@ class Circuit:
         can_sacrifice = self.state != "OVER" and self.rounds < self.tm.max_rounds
         cands, _ = self.ladder(t, 3 if can_sacrifice else 2)
         printers = [c for c in cands if c.tier >= 2]
-        if any(c.tier == 1 for c in cands) or not printers or self._printer_trigger(kind, t):
+        if any(c.tier == 1 for c in cands) or not printers:
+            return True
+        if self.wait_for and all((p.at, p.reachable) == self.wait_for[k]
+                                 for k, p in self.plugs.items() if k in self.wait_for):
+            return False  # nothing new from the plugs it could not check: no new look yet
+        if self._printer_trigger(kind, t):
             return True
         self._wait_log(t, printers)
         return False
@@ -723,6 +728,7 @@ class Circuit:
             self._wait_log(t, printers)
             self._start_lockout(t)
             return
+        self.shot_from = self.state
         self._refresh(t, 3 if can_sacrifice else 2)
 
     def _refresh(self, t: float, max_tier: int) -> None:
@@ -753,11 +759,10 @@ class Circuit:
         if s_ver <= cfg.shed_w:  # fix A: under the shed line on fresh numbers: no printer is cut
             if self.total(t) <= cfg.shed_w:
                 self.outcome = "ok"
-            elif unverified and self.rechecks < self.tm.recheck_max and all(
-                    self.plugs[k].reachable for k in unverified):
-                # A plug that answers only missed its re-read: look again at the next
-                # trip instead of giving up on the circuit (OVER).
-                self.rechecks += 1
+            elif unverified and all(self.plugs[k].reachable for k in unverified):
+                # A plug that answers only missed its re-read: look again once it has
+                # something new, instead of giving up on the circuit (OVER). A plug that
+                # stays quiet is marked not reachable after silent_s, then this flags.
                 self.outcome = "recheck"
             else:
                 self.outcome = "unverified_over"
@@ -781,9 +786,17 @@ class Circuit:
                   answered=self._answered(), waited_s=round(t - (self.refresh_at or t), 2))
         if self.outcome == "cant_protect":
             self._followup(t, "cant_protect", True, sum=round(self.total(t)))
+        self.wait_for = ({k: (self.plugs[k].at, self.plugs[k].reachable) for k in unverified}
+                         if self.outcome in ("recheck", "unverified_over") else {})
         self._fire(t, pick)
         if not self.fired:
             self.rounds -= 1  # rule 6 counts rounds that turned something off
+            if self.outcome == "recheck":
+                # Nothing is settling, so no lockout: the next look comes as soon as a
+                # plug it could not check has something new (wait_for), while that is
+                # still fresh. A lockout here can phase-lock with a slow reporter.
+                self.state = "OVER" if self.shot_from == "OVER" else "HOLD"
+                return
         self._start_lockout(t)
 
     def _fire(self, t: float, pick: list[Cand]) -> None:
@@ -963,7 +976,6 @@ class Circuit:
             self.event += 1
             self.event_open, self.rounds = True, 0
             self.opened_at, self.peak, self.lost_print = t, self.total(t), False
-            self.rechecks = 0
             for p in self.plugs.values():
                 p.tries, p.gave_up = 0, False
             self._log(t, "event_open", sum=round(self.total(t)))
