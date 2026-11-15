@@ -326,3 +326,49 @@ func TestFFmpegPath(t *testing.T) {
 		t.Fatalf("%q %v", p, err)
 	}
 }
+
+// TestToJPEGWithoutTempDir is the 0.6.0 camera failure: the scratch image has
+// no /tmp, and ffmpeg was started in os.TempDir(), so the chdir failed before
+// ffmpeg ran ("cannot run ffmpeg (no such file or directory)"). A missing
+// $TMPDIR stands in for the missing /tmp; the real exec must still work, run
+// in FFmpegDir, and keep argv and environment as before.
+func TestToJPEGWithoutTempDir(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "no-such-tmp")
+	t.Setenv("TMPDIR", missing)
+	if _, err := os.Stat(os.TempDir()); !os.IsNotExist(err) {
+		t.Fatalf("os.TempDir() %q should not exist: %v", os.TempDir(), err)
+	}
+	// The pwd file sits next to the missing dir, in a folder the test owns.
+	pwdFile := missing + ".pwd"
+	ff, argvFile, envFile, _ := fakeFFmpeg(t, "/bin/pwd -P > '"+pwdFile+"' 2>&1 || true\n")
+	au := append([]byte{0, 0, 0, 1}, 0x67, 1, 2, 3)
+	var dir string
+	var env []string
+	run := func(c *exec.Cmd) error {
+		dir, env = c.Dir, c.Env
+		return c.Run()
+	}
+	out, err := toJPEG(context.Background(), ff, au, 640, run)
+	if err != nil {
+		t.Fatalf("ffmpeg did not run without a temp dir: %v", err)
+	}
+	if !bytes.HasPrefix(out, []byte{0xFF, 0xD8}) || bytes.Contains(out, []byte("Exif")) {
+		t.Fatal("output not a stripped JPEG")
+	}
+	if dir != FFmpegDir || FFmpegDir != "/" {
+		t.Fatalf("ffmpeg dir %q, want %q", dir, "/")
+	}
+	if env == nil || len(env) != 0 {
+		t.Fatalf("env %q (must be empty, not inherited)", env)
+	}
+	if b, _ := os.ReadFile(pwdFile); strings.TrimSpace(string(b)) != "/" {
+		t.Fatalf("ffmpeg ran in %q, want /", b)
+	}
+	if b, _ := os.ReadFile(envFile); bytes.Contains(b, []byte("TMPDIR")) {
+		t.Fatalf("child inherited TMPDIR: %q", b)
+	}
+	argv, _ := os.ReadFile(argvFile)
+	if want := strings.Join(Args(640), "\n") + "\n"; string(argv) != want {
+		t.Fatalf("argv %q, want %q", argv, want)
+	}
+}

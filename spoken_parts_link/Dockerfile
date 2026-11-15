@@ -1,6 +1,6 @@
 # Spoken Parts Link image. Build from the repository root, for example:
 #   docker buildx build -f spoken_parts_link/Dockerfile \
-#     --platform linux/amd64,linux/arm64 --build-arg VERSION=0.6.0 .
+#     --platform linux/amd64,linux/arm64 --build-arg VERSION=0.6.1 .
 #
 # build.yaml is deprecated (2026-04), so the base image, arguments and labels
 # all live here. The builder image is pinned by digest.
@@ -13,7 +13,7 @@ ARG FFMPEG_VERSION=6.1.2-r2
 FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS build
 ARG TARGETOS=linux
 ARG TARGETARCH
-ARG VERSION=0.6.0
+ARG VERSION=0.6.1
 WORKDIR /src
 COPY go.mod ./
 COPY cmd ./cmd
@@ -21,6 +21,10 @@ COPY internal ./internal
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} GOFLAGS=-buildvcs=false \
     go build -trimpath -ldflags "-s -w -buildid= -X main.version=${VERSION}" \
     -o /out/spoken-parts-link ./cmd/spoken-parts-link
+# 0.6.1: an empty /tmp (1777, like any Linux /tmp) for the scratch image.
+# 0.6.0 had none, and os.TempDir() is /tmp. The camera no longer depends on
+# it (ffmpeg runs in /), but a missing /tmp must not break anything else.
+RUN mkdir -p /out/root/tmp && chmod 1777 /out/root/tmp
 
 # ffmpeg and its libraries for the target architecture, installed into a
 # separate root by the build platform's apk (signed packages, no scripts), so
@@ -41,12 +45,13 @@ FROM scratch AS base-arm64
 LABEL io.hass.arch="aarch64"
 
 FROM base-${TARGETARCH}
-ARG VERSION=0.6.0
+ARG VERSION=0.6.1
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=ffmpeg /rootfs/lib/ /lib/
 COPY --from=ffmpeg /rootfs/usr/lib/ /usr/lib/
 COPY --from=ffmpeg /rootfs/usr/bin/ffmpeg /usr/bin/ffmpeg
 COPY --from=build /out/spoken-parts-link /usr/bin/spoken-parts-link
+COPY --from=build /out/root/ /
 LABEL io.hass.type="addon" \
       io.hass.name="Spoken Parts Link" \
       io.hass.description="Sends prints from Spoken Parts to your Bambu Lab printers, shows their status and watches them for problems." \

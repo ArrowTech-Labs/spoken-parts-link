@@ -101,6 +101,24 @@ jobs:
           platforms: linux/amd64,linux/arm64
           build-args: VERSION=ci
           push: false
+      # 0.6.1: 0.6.0 shipped without /tmp and every camera picture failed.
+      - name: Build the amd64 image for the image checks
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: spoken_parts_link/Dockerfile
+          platforms: linux/amd64
+          build-args: VERSION=ci
+          load: true
+          tags: spoken-parts-link:ci
+          push: false
+      - name: Image has /tmp (1777) and ffmpeg runs as the app user
+        run: |
+          cid="$(docker create spoken-parts-link:ci)"
+          docker export "$cid" | tar -tvf - > image-files.txt
+          docker rm "$cid"
+          grep -E '^drwxrwxrwt .* tmp/$' image-files.txt
+          docker run --rm --network none -u 65532 --entrypoint /usr/bin/ffmpeg spoken-parts-link:ci -hide_banner -version
 
   ha-integration:
     name: Home Assistant integration (Python)
