@@ -12,11 +12,11 @@ It counts what it turned off as zero at once and looks again only after fresh
 readings arrive (at most 3 rounds per event), so stale readings cannot make it
 cut more. A print is only cut on fresh readings.
 
-Heaters and dryers are turned off after the circuit's short trip filter (2 s by
-default). A printer is turned off only after the circuit has been over the shed
-line for 60 s without a break, or at once over the hard line, and only after
-every plug on the circuit was read again and the fresh sum is still over the
-line (readings older than 5 s do not count). A heater or dryer that is in a
+The trip uses the circuit's short trip filter (2 s by default; at once over the
+hard line). Before a printer is turned off, every plug on the circuit is asked
+for its draw right now (a direct Zigbee read through Home Assistant), and the
+printer is turned off only if the fresh sum is still over the shed line
+(readings older than 5 s do not count). A heater or dryer that is in a
 heating session counts at its learned draw even between its pulses, so it goes
 before any printer. Heaters and dryers come back
 on by themselves when there is room, then printers that were not printing. A

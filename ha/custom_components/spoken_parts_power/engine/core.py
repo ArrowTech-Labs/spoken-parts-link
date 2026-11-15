@@ -13,16 +13,14 @@ with Marc's answers applied (Nov 15, 2026):
   and the engine checks there is room first.
 
 After the two wrong H2D cuts of Nov 15, 2026 (ATS-SP-POWER-INCIDENT-1 and
-ATS-SP-POWER-FIX-1), with Marc's fixes A, B and C:
+ATS-SP-POWER-FIX-1), with Marc's answers Q-40 to Q-42:
 
-- A. Before any printer is cut, every plug on the circuit is read again and the
-  decision uses fresh readings only: no reading older than the plugs' reporting
-  interval (`fresh_s`, 5 s) counts. A printer is cut only if the circuit is
-  still over the shed line on those fresh numbers.
-- B. Heaters and dryers keep the fast trigger (the circuit's sustain_s mean).
-  A printer may be cut only when the circuit has been over the shed line
-  continuously for `printer_sustain_s` (60 s), or is over the hard line on
-  fresh readings. This is an engine constant, not a circuit setting.
+- A/B. Before any printer is cut, every plug on the circuit is asked for its
+  draw right now over Zigbee (a direct read through Home Assistant), and the
+  decision uses those fresh readings only: no reading older than the plugs'
+  reporting interval (`fresh_s`, 5 s) counts. A printer is cut only if the
+  circuit is really over the shed line on those fresh numbers. The trigger
+  itself is not slowed down (Marc, Q-41: no slower trigger).
 - C. A heater or dryer in an active heating session (it drew at least
   `restart_dry_w` within `heater_session_s`) counts at its learned draw in the
   line-up, even in the off half of its cycle, so it goes before any printer.
@@ -67,13 +65,9 @@ class Timers:
     fresh_s: float = 5.0
     # Fix A: wait this long at most for every plug's fresh re-read.
     refresh_timeout_s: float = 2.0
-    # Fix B: over the shed line continuously this long before a printer may be
-    # cut (the hard line still acts at once). Heaters keep the sustain_s filter.
-    printer_sustain_s: float = 60.0
     # Fix C: a heater that drew restart_dry_w within this long is still in its
     # heating session, so it counts at its learned draw between pulses.
     heater_session_s: float = 180.0
-    printer_wait_log_s: float = 300.0  # at most one printer_wait entry this often
     lockout_min_s: float = 3.0
     lockout_max_s: float = 10.0
     verify_off_s: float = 5.0
@@ -326,9 +320,6 @@ class Circuit:
         self.drop_after = False
         self.switching_off_logged = False
         self.lost_print = False
-        self.over_since: float | None = None  # fix B: over the shed line continuously since
-        self.wait_logged = False  # fix B: one printer_wait entry per stretch over the line
-        self.wait_log_at = -1e9
         # Fix A: after a decision that could not check some plugs, the printer path waits
         # until one of them has something new (a reading, or it went unreachable).
         self.wait_for: dict[str, tuple[float, bool]] = {}
@@ -479,12 +470,8 @@ class Circuit:
             self.hist = [h for h in self.hist if h[0] >= cut]
         if self.event_open:
             self.peak = max(self.peak, now_w)
-        # Fix B: how long the circuit has been over the shed line without a break.
-        if now_w > self.cfg.shed_w and self.state in ACTIVE_STATES + ("SHED", "LOCKOUT"):
-            if self.over_since is None:
-                self.over_since = t
-        else:
-            self.over_since, self.wait_logged, self.wait_for = None, False, {}
+        if now_w <= self.cfg.shed_w or self.state not in ACTIVE_STATES + ("SHED", "LOCKOUT"):
+            self.wait_for = {}  # under the line again: the next look starts clean
         if self.state == "OFF":
             return
         if self.state in ("HOLD", "RESTORE", "OVER"):  # the calm clock
@@ -645,17 +632,9 @@ class Circuit:
         m = self.mean(t)
         return "shed" if m is not None and m > self.cfg.shed_w else None
 
-    def over_s(self, t: float) -> float:
-        return 0.0 if self.over_since is None else t - self.over_since
-
-    def _printer_trigger(self, kind: str, t: float) -> bool:
-        """Fix B: a printer may be cut over the hard line, or after printer_sustain_s
-        over the shed line without a break."""
-        return kind == "hard" or self.over_s(t) >= self.tm.printer_sustain_s
-
     def _may_trip(self, t: float, kind: str) -> bool:
-        """Heaters keep the fast trigger. When only printers are left to cut, the
-        trip waits for the printer trigger (fix B) and says so once."""
+        """When only printers are left to cut and the last look could not check some
+        plugs, wait until one of them has something new (no trip loop)."""
         can_sacrifice = self.state != "OVER" and self.rounds < self.tm.max_rounds
         cands, _ = self.ladder(t, 3 if can_sacrifice else 2)
         printers = [c for c in cands if c.tier >= 2]
@@ -667,18 +646,7 @@ class Circuit:
             # Nothing new from the plugs it could not check, and the plugs it can check
             # are not over the line by themselves: no new look yet.
             return False
-        if self._printer_trigger(kind, t):
-            return True
-        self._wait_log(t, printers)
-        return False
-
-    def _wait_log(self, t: float, printers: list[Cand]) -> None:
-        # Only while the sum itself is over the line (not just the tail of the 2 s mean).
-        if not self.wait_logged and self.over_since is not None \
-                and t - self.wait_log_at >= self.tm.printer_wait_log_s:
-            self.wait_logged, self.wait_log_at = True, t
-            self._log(t, "printer_wait", sum=round(self.total(t)), over_s=round(self.over_s(t), 1),
-                      wait_s=self.tm.printer_sustain_s, plugs=[c.plug.key for c in printers])
+        return True
 
     def _answered(self) -> bool:
         """Fix A: every plug asked for a fresh reading has answered."""
@@ -711,7 +679,6 @@ class Circuit:
         self.hard_since = None
         self._log(t, "trip", round=self.rounds, sum=round(judged), sum_now=round(s_now),
                   shed_w=cfg.shed_w, target=cfg.target_w, need=round(need), line=kind,
-                  over_s=round(self.over_s(t), 1),
                   ladder=[[c.plug.key, c.tier, round(c.w), c.value, c.note] for c in cands],
                   skipped=[list(s) for s in skipped])
         pick, ok = self._prefix(heaters, need)
@@ -723,12 +690,6 @@ class Circuit:
         self._fire(t, heaters)  # every heater is in any larger plan
         if not printers:
             self.outcome = "cant_reach_target"
-            self._start_lockout(t)
-            return
-        if not self._printer_trigger(kind, t):
-            # Fix B: the heaters went at once; a printer waits for the slow trigger.
-            self.outcome = "printer_wait"
-            self._wait_log(t, printers)
             self._start_lockout(t)
             return
         self.shot_from = self.state
@@ -769,8 +730,6 @@ class Circuit:
                 self.outcome = "recheck"
             else:
                 self.outcome = "unverified_over"
-        elif not self._printer_trigger("hard" if hard else "shed", t):
-            self.outcome = "printer_wait"  # fix B: over the shed line, not yet for 60 s
         else:
             pick, ok = self._prefix(cands, need)
             if ok:
@@ -785,7 +744,6 @@ class Circuit:
         self._log(t, "sacrifice_decision", verified_sum=round(s_ver), need=round(need),
                   unverified=unverified, plugs=[c.plug.key for c in pick], outcome=self.outcome,
                   values=[[c.plug.key, c.value] for c in cands], hard=hard,
-                  over_s=round(self.over_s(t), 1),
                   answered=self._answered(), waited_s=round(t - (self.refresh_at or t), 2))
         if self.outcome == "cant_protect":
             self._followup(t, "cant_protect", True, sum=round(self.total(t)))

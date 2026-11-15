@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.2
+
+- Power protection (Spoken Parts Power 0.1.2): the one-minute wait before a
+  printer could be turned off is gone again, as Marc decided. Instead, before
+  any printer is turned off, every plug on the circuit is asked for its draw
+  right now over Zigbee, and the printer is turned off only if the circuit is
+  really over the line on those fresh readings. AMS HT heaters and dryers that
+  are drying still count at their usual draw between heating pulses.
+- The link app itself is unchanged.
+
 ## 0.7.1
 
 - Power protection no longer turns a printer off for a short power spike.
