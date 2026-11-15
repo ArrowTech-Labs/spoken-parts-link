@@ -14,6 +14,12 @@ status in Spoken Parts.
   Spoken Parts.
 - Opens no port to the internet.
 
-It never pauses, stops or moves a printer, and never changes its settings.
+- From version 0.7, works with the Spoken Parts Power integration in Home
+  Assistant, which can turn smart plugs off to keep a breaker from tripping.
+
+The link never pauses, stops or moves a printer, and never changes its
+settings. With power protection set up in Spoken Parts, the Spoken Parts Power
+integration can cut the power to a printer, dryer or AMS HT plug, which stops
+what it was doing.
 
 See the Documentation tab for setup steps.

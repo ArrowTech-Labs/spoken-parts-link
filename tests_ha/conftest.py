@@ -15,6 +15,11 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+# The Spoken Parts Power integration lives in ha/custom_components (outside the
+# folder HACS reads, which holds one integration per repository). custom_components
+# is a namespace package, so both folders import as custom_components.*.
+if str(ROOT / "ha") not in sys.path:
+    sys.path.insert(1, str(ROOT / "ha"))
 
 
 def run(coro):

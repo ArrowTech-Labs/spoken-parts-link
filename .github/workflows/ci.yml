@@ -134,7 +134,7 @@ jobs:
         env:
           LC_ALL: C.UTF-8
         run: |
-          if grep -rnP '[\x{2013}\x{2014}]' custom_components hacs.json; then
+          if grep -rnP '[\x{2013}\x{2014}]' custom_components ha hacs.json; then
             echo "::error::Customer text must not use em or en dashes."
             exit 1
           fi
@@ -142,11 +142,16 @@ jobs:
         run: |
           for f in hacs.json custom_components/spoken_parts_printers/manifest.json \
                    custom_components/spoken_parts_printers/strings.json \
-                   custom_components/spoken_parts_printers/translations/en.json; do
+                   custom_components/spoken_parts_printers/translations/en.json \
+                   ha/custom_components/spoken_parts_power/manifest.json \
+                   ha/custom_components/spoken_parts_power/strings.json \
+                   ha/custom_components/spoken_parts_power/translations/en.json; do
             python -m json.tool "$f" > /dev/null
           done
           cmp custom_components/spoken_parts_printers/strings.json \
               custom_components/spoken_parts_printers/translations/en.json
+          cmp ha/custom_components/spoken_parts_power/strings.json \
+              ha/custom_components/spoken_parts_power/translations/en.json
       - name: Core tests (no Home Assistant installed)
         run: |
           python -m venv "$RUNNER_TEMP/core"

@@ -36,3 +36,9 @@ route them.
 
 See [THREAT-MODEL.md](THREAT-MODEL.md) for what the link protects, how, and the
 risks that remain.
+
+From version 0.7 this repository also ships the Spoken Parts Power integration
+for Home Assistant (`ha/custom_components/spoken_parts_power`). It can turn smart
+plugs off and on to keep a breaker from tripping, which can stop a print or a
+dry. Problems that could make it switch the wrong plug, or switch without the
+owner's setup, are in scope and urgent.

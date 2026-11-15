@@ -30,6 +30,11 @@ images are built. It is written for customers, auditors and contributors.
    gives the app for its `homeassistant_api` permission. It can call Home
    Assistant's whole REST API (any action, any state), so it matters as much
    as the Home Assistant host itself.
+9. **Mains power to the farm's equipment (0.7).** With power protection set up,
+   the Spoken Parts Power integration in Home Assistant can turn off the plugs
+   of printers, dryers and AMS HT heaters on configured circuits. Spoken Parts
+   can therefore stop a print or a dry by cutting its power. Wrong config or a
+   wrong decision could end a print that did not need to end.
 
 ## 2. Who might attack
 
@@ -192,7 +197,24 @@ inbound port: every call is made by the link.
 | Paused or removed link | Nothing is reported, polled or printed while Spoken Parts pauses the link, and the runner stops and forgets its status when the link is removed. |
 | 3D printers | Label jobs never use MQTT, FTPS or a Bambu printer. A repository test fails if the label or Supervisor code imports the printer, MQTT, FTPS, sends or camera packages. The MQTT allow list is unchanged. |
 
-### 4.11 Supply chain (B4)
+### 4.11 Power protection (B1, B3)
+
+New in 0.7: the Spoken Parts Power integration (an engine inside Home
+Assistant) switches smart plugs to keep a breaker from tripping. The link
+relays between it and Spoken Parts over Home Assistant's websocket through the
+Supervisor (`ws://supervisor/core/websocket`), using the same
+`homeassistant_api` permission. No new port.
+
+| Threat | Mitigation |
+|---|---|
+| The link switches something | It cannot by design: `internal/haapi/ws.go` refuses every websocket command but the seven `spoken_parts_power/*` commands before a byte is sent, and none of them is a Home Assistant action. A repository test fails if any Go code names `turn_off`, `turn_on`, `call_service` or a `switch.` entity. The MQTT allow list is unchanged and the power code may not import the printer, MQTT, FTPS, sends or camera packages. |
+| A compromised backend cuts power | It can change circuit lines and what each plug powers, and ask for a shed printer's power back. The engine only ever switches THIRDREALITY 3RSP02064Z plugs on ZHA, only the relay entity of that same device, only on circuits in its config, and only by its own rules: it turns things off only when the measured sum crosses the line and turns on only what it turned off itself. Lines outside 40 to 100 percent of the breaker are refused. A backend could still set a low line on a real circuit and cause sheds. An admin can stop all switching in Home Assistant with the integration's "Allow switching" option. |
+| A wrong decision ends a print | Prints are cut last, lowest value first, only on fresh readings, at most 3 rounds per event; fired plugs count as zero at once and nothing is evaluated during the lockout, so stale readings cannot cascade (tested with the design's scenarios and a property test). A printer that was printing is never turned back on by the engine. |
+| The internet is down | Protection is local. The link keeps feeding the engine and queues the engine's audit entries on disk until Spoken Parts takes them. |
+| Home Assistant or the engine is down | Nothing can be switched; plugs stay as they are. Spoken Parts shows "power protection is offline" and alerts the owner and leads after 5 minutes. |
+| Printer control | Nothing new is sent to a printer. The engine's only control is the plug. |
+
+### 4.12 Supply chain (B4)
 
 | Threat | Mitigation |
 |---|---|
@@ -233,3 +255,7 @@ inbound port: every call is made by the link.
    `internal/haapi` limits what the link's own code does, not what a
    compromised process can do. Owners who do not use label printers still
    grant this permission when they install 0.5.
+12. **Cutting power is a real action (0.7).** With power protection set up,
+   Spoken Parts can end a print or a dry by cutting its plug's power. The
+   engine's rules limit when, and the owner sets up which plugs and circuits,
+   but a wrong line or a mislabeled plug could still cut the wrong thing.

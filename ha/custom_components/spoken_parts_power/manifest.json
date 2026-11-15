@@ -1,0 +1,15 @@
+{
+  "domain": "spoken_parts_power",
+  "name": "Spoken Parts Power",
+  "codeowners": ["@mrmarcsmith"],
+  "config_flow": true,
+  "dependencies": ["websocket_api"],
+  "after_dependencies": ["zha"],
+  "documentation": "https://github.com/ArrowTech-Labs/spoken-parts-link/tree/main/ha/custom_components/spoken_parts_power",
+  "integration_type": "service",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/ArrowTech-Labs/spoken-parts-link/issues",
+  "requirements": [],
+  "single_config_entry": true,
+  "version": "0.1.0"
+}

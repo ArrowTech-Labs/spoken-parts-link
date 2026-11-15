@@ -1,0 +1,39 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Spoken Parts Power",
+        "description": "Protects your breakers. When the power on a circuit gets too high, it turns smart plugs off in a set order: AMS HT heaters and dryers first, then printers that are not printing, then the print with the least filament on its plate. Circuits and what each plug powers are set up on the Power page in Spoken Parts. Only THIRDREALITY Smart Plug Gen3 plugs on ZHA are ever switched.",
+        "data": {
+          "allow_switching": "Allow switching"
+        },
+        "data_description": {
+          "allow_switching": "On: plugs are turned off and back on to protect the breaker. Off: nothing is switched, the power is only measured."
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "Spoken Parts Power is already set up.",
+      "single_instance_allowed": "Spoken Parts Power is already set up."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Spoken Parts Power",
+        "data": {
+          "allow_switching": "Allow switching"
+        },
+        "data_description": {
+          "allow_switching": "On: plugs are turned off and back on to protect the breaker. Off: nothing is switched, the power is only measured."
+        }
+      }
+    }
+  },
+  "services": {
+    "apply_plug_settings": {
+      "name": "Apply plug settings",
+      "description": "Sets the power report thresholds to 1 W and power on behavior to previous on every plug that is on a circuit. Never turns a plug on or off."
+    }
+  }
+}
