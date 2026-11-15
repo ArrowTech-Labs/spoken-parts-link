@@ -188,7 +188,7 @@ def test_A_a_plug_that_does_not_answer_counts_only_if_its_reading_is_under_5_s_o
     """The X2D stops reporting and does not answer the re-read. Its last 700 W is
     4.5 s old at the hard-line trip (it counted as current before the fix) and over
     5 s at the decision: it is dropped. The fresh total is under the shed line, so no
-    printer is cut; the circuit is flagged instead (unverified_over)."""
+    printer is cut; after three more looks the circuit is flagged (unverified_over)."""
     w = Cadence(gap=5.0)
     w.add("H2D", step((0, 48), (9.5, 1300)), phase=4.5)
     w.add("X2D", step((0, 700)), phase=0.5)
@@ -200,13 +200,15 @@ def test_A_a_plug_that_does_not_answer_counts_only_if_its_reading_is_under_5_s_o
     def mute(now):
         w.muted.add("X2D")
 
-    w.run(eng, 30, [(6.0, mute)])
+    w.run(eng, 90, [(6.0, mute)])
     trip = kinds(eng, "trip")[0]
     assert trip[1]["line"] == "hard" and 4.0 < trip[0] - 5.5 < 5.0, trip
-    d = kinds(eng, "sacrifice_decision")[0][1]
+    decs = kinds(eng, "sacrifice_decision")
+    d = decs[0][1]
     assert "X2D" in d["unverified"] and d["answered"] is False and d["waited_s"] >= 1.9, d
     assert d["verified_sum"] == 1300 and d["plugs"] == [], d
-    assert d["outcome"] == "unverified_over"
+    # It answers nothing and reports nothing: three more looks, then a person is asked.
+    assert [x["outcome"] for _, x in decs] == ["recheck"] * 3 + ["unverified_over"], decs
     assert not offs(eng)
 
 
@@ -242,7 +244,7 @@ def test_B_a_dip_under_the_shed_line_starts_the_60_s_over():
     eng.feed_plug("P2", "starting", 0, 0)
     w.run(eng, 200)
     assert not offs(eng), offs(eng)
-    assert len(kinds(eng, "printer_wait")) == 2
+    assert len(kinds(eng, "printer_wait")) == 1, "at most one entry every 5 min"
 
 
 def test_B_hard_line_cuts_a_printer_at_once_on_fresh_readings():
@@ -291,3 +293,73 @@ def test_C_heater_without_a_learned_draw_is_still_skipped_when_idle():
     w.run(eng, 20)
     cands, skipped = eng.circuits["A"].ladder(20.25)
     assert not cands and skipped == [("HT", "not drawing")]
+
+
+# ---- from the independent review ----------------------------------------------------------
+
+
+def test_review_1_no_cut_decisions_do_not_use_up_the_rounds():
+    """A real 1,700 W overload whose reading spikes over the hard line every 10 s.
+    Each spike trips the hard line, the fresh re-read is under it, and the engine
+    waits. Those decisions cut nothing, so they must not use up the 3 rounds: after
+    60 s over the shed line the cheaper print is cut."""
+    w = Cadence(gap=5.0)
+    w.add("P1", step((0, 700)), phase=0.5)
+    w.add("P2", lambda t: 1150.0 if (t % 10) < 0.5 and t >= 10 else 1000.0, phase=0.0)
+    eng = engine(w, [Plug("P1", "printer"), Plug("P2", "printer")])
+    eng.feed_plug("P1", "printing", 5000, 0)
+    eng.feed_plug("P2", "printing", 900, 0)
+    w.run(eng, 120)
+    off = offs(eng)
+    assert [k for _, k in off] == ["P2"] and off[0][0] < 70, off
+    assert eng.circuits["A"].state != "OVER"
+    assert not [d for _, d in kinds(eng, "cant_protect")]
+
+
+def test_review_2_a_missed_re_read_is_looked_at_again_not_latched_over():
+    """A real 1,700 W overload. P1 reports every 5.5 s and never answers a re-read, so
+    at some decisions its reading is just over 5 s old. The engine looks again instead
+    of going to OVER, and the print is cut at every phase."""
+    for ph in (0.0, 1.0, 2.0, 3.0, 4.0, 5.0):
+        w = Cadence(gap=5.5)
+        w.add("P1", step((0, 700)), phase=ph)
+        w.add("P2", step((0, 60), (5, 1000)), phase=0.25)
+        w.unanswered.add("P1")
+        eng = engine(w, [Plug("P1", "printer"), Plug("P2", "printer")])
+        eng.feed_plug("P1", "printing", 5000, 0)
+        eng.feed_plug("P2", "printing", 900, 0)
+        w.run(eng, 200)
+        assert [k for _, k in offs(eng)] == ["P2"], (ph, offs(eng), kinds(eng, "sacrifice_decision"))
+        assert eng.circuits["A"].state != "OVER", ph
+
+
+def test_review_2_a_plug_that_cannot_be_reached_still_flags_the_circuit():
+    """The old rule stays for a plug the engine cannot reach at all: no print is cut on
+    its old reading, and a person is asked (OVER, cant_protect)."""
+    w = Cadence(gap=5.0)
+    w.add("P1", step((0, 700)), phase=0.5)
+    w.add("P2", step((0, 60), (5, 1000)), phase=0.0)
+    eng = engine(w, [Plug("P1", "printer"), Plug("P2", "printer")])
+    eng.feed_plug("P1", "printing", 5000, 0)
+    eng.feed_plug("P2", "printing", 900, 0)
+
+    def lose(now):
+        w.silent.add("P1")
+        eng.on_reachable("P1", False, now)
+
+    w.run(eng, 200, [(7, lose)])
+    assert not offs(eng)
+    assert eng.circuits["A"].state == "OVER"
+    assert any(d["outcome"] == "unverified_over" for _, d in kinds(eng, "sacrifice_decision"))
+
+
+def test_review_3_hovering_at_the_line_writes_few_printer_wait_entries():
+    w = Cadence(gap=5.0)
+    w.add("P1", step((0, 700)), phase=0.0)
+    w.add("P2", lambda t: 760.0 if int(t // 5) % 2 else 700.0, phase=0.0)
+    eng = engine(w, [Plug("P1", "printer"), Plug("P2", "printer")])
+    eng.feed_plug("P1", "printing", 5000, 0)
+    eng.feed_plug("P2", "printing", 900, 0)
+    w.run(eng, 3600)
+    assert not offs(eng)
+    assert len(kinds(eng, "printer_wait")) <= 13, len(kinds(eng, "printer_wait"))

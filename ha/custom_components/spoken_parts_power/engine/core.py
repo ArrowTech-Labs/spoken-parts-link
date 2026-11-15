@@ -73,6 +73,10 @@ class Timers:
     # Fix C: a heater that drew restart_dry_w within this long is still in its
     # heating session, so it counts at its learned draw between pulses.
     heater_session_s: float = 180.0
+    # Fix A: a reachable plug that missed its re-read gets this many more looks in
+    # an event before the circuit is flagged as unverified (OVER).
+    recheck_max: int = 3
+    printer_wait_log_s: float = 300.0  # at most one printer_wait entry this often
     lockout_min_s: float = 3.0
     lockout_max_s: float = 10.0
     verify_off_s: float = 5.0
@@ -327,6 +331,8 @@ class Circuit:
         self.lost_print = False
         self.over_since: float | None = None  # fix B: over the shed line continuously since
         self.wait_logged = False  # fix B: one printer_wait entry per stretch over the line
+        self.wait_log_at = -1e9
+        self.rechecks = 0  # fix A: decisions in this event that waited for a missed re-read
         self.refresh_at: float | None = None  # fix A: when the pre-cut re-read went out
         self.refresh_keys: list[str] = []
         self.shot_tier = 3  # the highest tier this round's decision may cut
@@ -660,8 +666,9 @@ class Circuit:
 
     def _wait_log(self, t: float, printers: list[Cand]) -> None:
         # Only while the sum itself is over the line (not just the tail of the 2 s mean).
-        if not self.wait_logged and self.over_since is not None:
-            self.wait_logged = True
+        if not self.wait_logged and self.over_since is not None \
+                and t - self.wait_log_at >= self.tm.printer_wait_log_s:
+            self.wait_logged, self.wait_log_at = True, t
             self._log(t, "printer_wait", sum=round(self.total(t)), over_s=round(self.over_s(t), 1),
                       wait_s=self.tm.printer_sustain_s, plugs=[c.plug.key for c in printers])
 
@@ -744,7 +751,16 @@ class Circuit:
         hard = s_ver >= cfg.hard_w
         pick: list[Cand] = []
         if s_ver <= cfg.shed_w:  # fix A: under the shed line on fresh numbers: no printer is cut
-            self.outcome = "ok" if self.total(t) <= cfg.shed_w else "unverified_over"
+            if self.total(t) <= cfg.shed_w:
+                self.outcome = "ok"
+            elif unverified and self.rechecks < self.tm.recheck_max and all(
+                    self.plugs[k].reachable for k in unverified):
+                # A plug that answers only missed its re-read: look again at the next
+                # trip instead of giving up on the circuit (OVER).
+                self.rechecks += 1
+                self.outcome = "recheck"
+            else:
+                self.outcome = "unverified_over"
         elif not self._printer_trigger("hard" if hard else "shed", t):
             self.outcome = "printer_wait"  # fix B: over the shed line, not yet for 60 s
         else:
@@ -766,6 +782,8 @@ class Circuit:
         if self.outcome == "cant_protect":
             self._followup(t, "cant_protect", True, sum=round(self.total(t)))
         self._fire(t, pick)
+        if not self.fired:
+            self.rounds -= 1  # rule 6 counts rounds that turned something off
         self._start_lockout(t)
 
     def _fire(self, t: float, pick: list[Cand]) -> None:
@@ -945,6 +963,7 @@ class Circuit:
             self.event += 1
             self.event_open, self.rounds = True, 0
             self.opened_at, self.peak, self.lost_print = t, self.total(t), False
+            self.rechecks = 0
             for p in self.plugs.values():
                 p.tries, p.gave_up = 0, False
             self._log(t, "event_open", sum=round(self.total(t)))
