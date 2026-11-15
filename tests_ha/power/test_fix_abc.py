@@ -426,3 +426,29 @@ def test_recheck_from_over_stays_over():
     w.run(eng, 100, start=20.25)
     assert c.state == "OVER"
     assert not [k for _, k in offs(eng) if k in ("P1", "P2")]
+
+
+def test_review_5_the_gate_never_holds_back_an_overload_the_other_plugs_show():
+    """P1 stops reporting and answering; a recheck waits for it. Then P3 starts and the
+    plugs that can be checked alone are over the hard line (1,900 W): the starting
+    print is cut at once, not after P1 is marked silent."""
+    w = Cadence(gap=5.0)
+    w.add("P1", step((0, 700)), phase=0.5)
+    w.add("P2", step((0, 60), (5, 1000)), phase=0.0)
+    w.add("P3", step((0, 15), (80, 900)), phase=0.25)
+    eng = engine(w, [Plug("P1", "printer"), Plug("P2", "printer"), Plug("P3", "printer")])
+    eng.feed_plug("P1", "printing", 5000, 0)
+    eng.feed_plug("P2", "printing", 900, 0)
+    eng.feed_plug("P3", "idle", None, 0)
+
+    def stop(now):
+        w.muted.add("P1")
+        w.unanswered.add("P1")
+
+    def start(now):
+        eng.feed_plug("P3", "starting", 0, now)
+
+    w.run(eng, 200, [(46, stop), (79, start)])
+    assert any(d["outcome"] == "recheck" for _, d in kinds(eng, "sacrifice_decision"))
+    off = offs(eng)
+    assert [k for _, k in off] == ["P3"] and off[0][0] < 90, off

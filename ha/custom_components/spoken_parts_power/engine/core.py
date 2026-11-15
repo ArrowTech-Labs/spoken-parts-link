@@ -661,9 +661,12 @@ class Circuit:
         printers = [c for c in cands if c.tier >= 2]
         if any(c.tier == 1 for c in cands) or not printers:
             return True
-        if self.wait_for and all((p.at, p.reachable) == self.wait_for[k]
-                                 for k, p in self.plugs.items() if k in self.wait_for):
-            return False  # nothing new from the plugs it could not check: no new look yet
+        if self.wait_for and self.total(t, verified_only=True) <= self.cfg.shed_w and all(
+                (p.at, p.reachable) == self.wait_for[k]
+                for k, p in self.plugs.items() if k in self.wait_for):
+            # Nothing new from the plugs it could not check, and the plugs it can check
+            # are not over the line by themselves: no new look yet.
+            return False
         if self._printer_trigger(kind, t):
             return True
         self._wait_log(t, printers)
