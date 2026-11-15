@@ -24,6 +24,7 @@ import (
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/labels"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/logx"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/monitor"
+	"github.com/ArrowTech-Labs/spoken-parts-link/internal/power"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/printers"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/redact"
 	"github.com/ArrowTech-Labs/spoken-parts-link/internal/sends"
@@ -81,6 +82,12 @@ type Config struct {
 	HABase  string
 	HAToken string
 	Labels  labels.Config
+
+	// 0.7 power protection: the Spoken Parts Power integration, reached over
+	// Home Assistant's websocket through the Supervisor. HAWS is
+	// haapi.DefaultWSURL unless a test sets it. Power: only the timings are used.
+	HAWS  string
+	Power power.Config
 }
 
 // FrameGrabber gets one JPEG over an open, checked camera connection.
@@ -98,6 +105,7 @@ type App struct {
 	printers *printers.Manager
 	sends    *sends.Runner
 	labels   *labels.Runner
+	power    *power.Runner
 	monitor  *monitor.Runner
 	ha       *hanotify.Notifier
 	started  time.Time
@@ -224,6 +232,16 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		lc.Now = cfg.Now
 	}
 	a.labels = labels.New(lc)
+	pc := cfg.Power
+	pc.API = linkAPI{a}
+	pc.Engine = haapi.NewWS(or(cfg.HAWS, haapi.DefaultWSURL), cfg.HAToken)
+	pc.Source = monitorSource{a}
+	pc.Log = cfg.Log
+	pc.QueuePath = filepath.Join(cfg.DataDir, "state", "power-queue.json")
+	if pc.Now == nil {
+		pc.Now = cfg.Now
+	}
+	a.power = power.New(pc)
 	if a.st.Status == store.StatusPending && cfg.Now().Sub(a.st.PendingSince) > cfg.PendingTimeout {
 		a.mu.Lock()
 		a.resetLocked(web.MsgTimedOut, true)
@@ -311,6 +329,9 @@ func (a *App) Run(ctx context.Context) {
 	ldone := make(chan struct{})
 	go func() { a.labels.Run(ctx); close(ldone) }()
 	defer func() { <-ldone }()
+	pdone := make(chan struct{})
+	go func() { a.power.Run(ctx); close(pdone) }()
+	defer func() { <-pdone }()
 	for ctx.Err() == nil {
 		s := a.snap()
 		switch s.status {
@@ -422,6 +443,7 @@ func (a *App) stepActive(ctx context.Context, s snapshot) {
 		a.st.PendingSince = a.cfg.Now().UTC()
 		a.saveStateLocked()
 		a.labels.SetEnabled(false)
+		a.power.SetEnabled(false)
 	case api.HasCode(err, api.CodeUnknownLink):
 		if !a.unknownLinkLocked() {
 			wait = a.cfg.UnknownRetry
@@ -459,6 +481,8 @@ func (a *App) stepActive(ctx context.Context, s snapshot) {
 		// while Spoken Parts pauses the link.
 		a.labels.SetPaused(resp.Paused)
 		a.labels.SetEnabled(true)
+		a.power.SetPaused(resp.Paused)
+		a.power.SetEnabled(true)
 		wait = a.nextSync(resp.NextSyncS)
 	}
 	a.mu.Unlock()
@@ -495,6 +519,7 @@ func (a *App) loadDataKey(ctx context.Context, s snapshot) bool {
 		a.st.PendingSince = a.cfg.Now().UTC()
 		a.saveStateLocked()
 		a.labels.SetEnabled(false)
+		a.power.SetEnabled(false)
 		return false
 	case api.HasCode(err, api.CodeUnknownLink):
 		if !a.unknownLinkLocked() {
@@ -766,6 +791,24 @@ func (l linkAPI) LabelJobState(ctx context.Context, id string, req api.LabelStat
 	return l.a.api.LabelJobState(ctx, s.key, s.linkID, id, req)
 }
 
+// PowerSync implements power.API.
+func (l linkAPI) PowerSync(ctx context.Context, r api.PowerSyncRequest) (*api.PowerSyncResponse, error) {
+	s, err := l.active()
+	if err != nil {
+		return nil, err
+	}
+	return l.a.api.PowerSync(ctx, s.key, s.linkID, r)
+}
+
+// PowerEvents implements power.API.
+func (l linkAPI) PowerEvents(ctx context.Context, r api.PowerEventsRequest) (*api.PowerEventsResponse, error) {
+	s, err := l.active()
+	if err != nil {
+		return nil, err
+	}
+	return l.a.api.PowerEvents(ctx, s.key, s.linkID, r)
+}
+
 // monitorSource gives the monitor the printers' reports and camera frames.
 type monitorSource struct{ a *App }
 
@@ -806,6 +849,7 @@ func (a *App) resetLocked(notice web.Msg, wipe bool) {
 	// monitor state and the camera frames.
 	a.sends.Reset()
 	a.labels.Reset()
+	a.power.Reset()
 	a.monitor.Reset()
 	a.ha.Lock()
 	if wipe {

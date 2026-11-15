@@ -16,7 +16,9 @@ Raspberry Pi.
   the printer was asked to run (temperature, hours, material), the AMS's raw
   status word, and which slots have filament in the feeder. Spoken Parts uses
   them to tell when a dry starts and finishes. The link only reads these; it
-  never starts, stops or changes a dry.
+  never sends a dry command. (With power protection on, the Spoken Parts Power
+  integration may turn off the plug of an AMS HT or a dryer, which stops its
+  dry. See "Power protection" below.)
 - It tells Spoken Parts what it sees, about every 30 seconds (every 5 seconds
   while a print is on its way).
 - It uploads the prints Spoken Parts sends to the printer's USB stick, and
@@ -46,7 +48,9 @@ Raspberry Pi.
   stream (RTSPS, port 322); nothing is sent to the printer for them.
 - It never pauses, stops or skips anything when it sees a problem. It tells
   people. Stopping a print stays with a person at the printer screen, in Bambu
-  Handy or in Bambu Studio.
+  Handy or in Bambu Studio. The one exception is power protection (below): to
+  keep a breaker from tripping, the Spoken Parts Power integration can turn off
+  a printer's plug, which ends its print.
 - It opens no port to the internet. It only makes outgoing HTTPS connections to
   spokenparts.com.
 
@@ -315,13 +319,44 @@ How it works:
 - Labels never go to a 3D printer. The link sends nothing new to your Bambu
   Lab printers for this.
 
+## Power protection (0.7)
+
+Spoken Parts can protect each breaker (a circuit) from tripping. You set up
+circuits and say what each smart plug powers on the Power page in Spoken Parts.
+The switching is done by the Spoken Parts Power integration in Home Assistant,
+not by the link.
+
+- Only THIRDREALITY Smart Plug Gen3 plugs (3RSP02064Z) paired with ZHA are ever
+  switched, and only plugs on a circuit you set up.
+- When the power on a circuit gets too high, it turns plugs off once, in this
+  order: AMS HT heaters and dryers, then printers that are not printing, then
+  the print with the least filament on its plate. A print is only turned off
+  when the readings are fresh and that is the only way to stay under the line.
+- Heaters, dryers and printers that were not printing come back on by
+  themselves when there is room. A printer that was printing stays off until a
+  person turns it back on.
+- The link tells the integration what each printer is doing and what its print
+  is worth, and passes on the circuit setup and people's requests from Spoken
+  Parts. It sends the integration's log of what it did to Spoken Parts. If the
+  internet is down, protection keeps working and the log waits on this device.
+- In the integration's options, "Allow switching" turns all switching off on
+  this device (power is then only measured).
+
+To install the integration, copy the `ha/custom_components/spoken_parts_power`
+folder from this repository into Home Assistant's `custom_components` folder,
+restart Home Assistant, then add "Spoken Parts Power" under Settings, Devices
+and services.
+
 ### Why the app has the "Home Assistant API" permission
 
 From version 0.5 the app asks for Home Assistant API access. Home Assistant
 gives the app a token for this, and the link uses it only to call the two
 actions of the Spoken Parts Printers integration: list the printers and print
-a label. The link refuses any other call, and the token is never written to
-the log or sent to Spoken Parts. The calls go to Home Assistant's Supervisor
+a label. From version 0.7 it also uses it for Home Assistant's websocket, only
+for the Spoken Parts Power integration's own commands; it never calls a Home
+Assistant action there and never turns a plug on or off. The link refuses any
+other call, and the token is never written to the log or sent to Spoken
+Parts. The calls go to Home Assistant's Supervisor
 on this device, not over your network or the internet, and no new port is
 opened.
 

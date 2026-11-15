@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.7.0
+
+- Power protection. Spoken Parts can now protect a breaker by turning smart
+  plugs off before the breaker trips. The plugs are switched by the new
+  Spoken Parts Power integration in Home Assistant (THIRDREALITY Smart Plug
+  Gen3 plugs on ZHA only), on the circuits you set up on the Power page in
+  Spoken Parts. When the power on a circuit gets too high it turns off, in
+  this order: AMS HT heaters and dryers, then printers that are not printing,
+  then the print with the least filament on its plate. Heaters, dryers and
+  idle printers come back on by themselves when there is room. A printer
+  that was printing stays off until a person turns it back on.
+- This means Spoken Parts can now stop a print or a dry by cutting the power
+  to its plug. It still never sends a printer a stop, pause or any other
+  command, and never changes a printer setting.
+- The link itself still switches nothing. It talks to the Spoken Parts Power
+  integration over Home Assistant's own websocket (the same "Home Assistant
+  API" permission, no new port), and only with that integration's own
+  commands: it tells the integration what each printer is doing and what its
+  print is worth, passes on the circuit setup and people's requests from
+  Spoken Parts, and sends the integration's log of what it did to Spoken
+  Parts. If the internet is down, the log waits on this device.
+
 ## 0.6.1
 
 - Fixes camera pictures. In 0.6.0 and earlier, every camera picture failed

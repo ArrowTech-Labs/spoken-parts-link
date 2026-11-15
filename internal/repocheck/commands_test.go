@@ -101,6 +101,18 @@ func TestHomeAssistantAPIUse(t *testing.T) {
 			t.Errorf("internal/haapi/haapi.go lacks %q", want)
 		}
 	}
+	// 0.7: the websocket client sends only the Spoken Parts Power commands,
+	// refuses anything else before a byte is sent, and never calls an action.
+	ws := read(t, "internal/haapi/ws.go")
+	for _, want := range []string{
+		"var AllowedCommands = [...]string{\"spoken_parts_power/hello\", \"spoken_parts_power/status\", \"spoken_parts_power/feed\", \"spoken_parts_power/config\", \"spoken_parts_power/command\", \"spoken_parts_power/entries\", \"spoken_parts_power/ack\"}\n",
+		"const DefaultWSURL = \"ws://supervisor/core/websocket\"\n",
+		"if !commandAllowed(typ) {\n\t\treturn nil, ErrCmdNotAllowed\n\t}",
+	} {
+		if !strings.Contains(ws, want) {
+			t.Errorf("internal/haapi/ws.go lacks %q", want)
+		}
+	}
 	var files []string
 	_ = filepath.WalkDir(filepath.Join(root, "internal"), func(p string, d os.DirEntry, err error) error {
 		if err == nil && !d.IsDir() && strings.HasSuffix(p, ".go") && !strings.HasSuffix(p, "_test.go") {
@@ -125,18 +137,27 @@ func TestHomeAssistantAPIUse(t *testing.T) {
 			if err != nil {
 				return true
 			}
-			if rel != "internal/haapi/haapi.go" && (strings.Contains(v, "SUPERVISOR_TOKEN") || strings.Contains(strings.ToLower(v), "supervisor/") ||
+			// 0.7: no Go code names a switch action or a generic service call.
+			// The link never turns a plug on or off; only the Spoken Parts
+			// Power integration in Home Assistant does.
+			lv := strings.ToLower(v)
+			if strings.Contains(lv, "turn_off") || strings.Contains(lv, "turn_on") || strings.Contains(lv, "call_service") ||
+				strings.Contains(lv, "switch.") || strings.Contains(lv, "switch/") || lv == "switch" || lv == "toggle" {
+				t.Errorf("%s: %q; the link never switches anything", rel, v)
+			}
+			inHA := rel == "internal/haapi/haapi.go" || rel == "internal/haapi/ws.go"
+			if !inHA && (strings.Contains(v, "SUPERVISOR_TOKEN") || strings.Contains(strings.ToLower(v), "supervisor/") ||
 				strings.Contains(v, "/services/") || strings.Contains(v, "/core/api")) {
 				t.Errorf("%s: %q; only internal/haapi talks to the Supervisor", rel, v)
 			}
 			return true
 		})
-		if strings.HasPrefix(rel, "internal/labels/") || strings.HasPrefix(rel, "internal/haapi/") {
+		if strings.HasPrefix(rel, "internal/labels/") || strings.HasPrefix(rel, "internal/haapi/") || strings.HasPrefix(rel, "internal/power/") {
 			for _, imp := range f.Imports {
 				path, _ := strconv.Unquote(imp.Path.Value)
 				for _, bad := range []string{"/internal/mqtt", "/internal/ftps", "/internal/printers", "/internal/sends", "/internal/camera", "/internal/rtsp"} {
 					if strings.HasSuffix(path, bad) {
-						t.Errorf("%s imports %s: label jobs never touch a 3D printer", rel, path)
+						t.Errorf("%s imports %s: label jobs and power relaying never touch a 3D printer", rel, path)
 					}
 				}
 			}

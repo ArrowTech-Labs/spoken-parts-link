@@ -10,6 +10,13 @@ stick (FTPS), sees them start when someone taps the file on the printer screen,
 and reports their progress until they finish. Printers stay in Bambu's Cloud
 mode. The link never pauses, stops or moves a printer.
 
+From version 0.7 Spoken Parts can also protect a breaker by turning smart plugs
+off, through the Spoken Parts Power integration in Home Assistant
+(`ha/custom_components/spoken_parts_power`). That means Spoken Parts can now stop a
+print or a dry by cutting the power to its plug, on circuits the owner set up
+in Spoken Parts. The link itself still switches nothing and still sends no
+stop, pause or other command to a printer.
+
 ## Install
 
 You need Home Assistant OS on a computer on the same network as your printers.
@@ -83,6 +90,17 @@ is also the app's Documentation tab in Home Assistant.
   any other code uses the Supervisor or its token. The label raster is opaque
   to the link and never logged. Label jobs never touch MQTT, FTPS or a 3D
   printer.
+- **Power protection (0.7).** The Spoken Parts Power integration
+  (`ha/custom_components/spoken_parts_power`) runs inside Home Assistant and
+  switches THIRDREALITY Smart Plug Gen3 plugs on ZHA, only those on circuits
+  configured in Spoken Parts, to keep a breaker from tripping. The link
+  (`internal/power`) talks to it over Home Assistant's websocket through the
+  Supervisor (`internal/haapi/ws.go`), with only the `spoken_parts_power/*`
+  commands: it sends each printer's state and print value, passes on the
+  circuit config and people's requests, and relays the integration's audit log
+  to Spoken Parts (queued on disk while offline). A repository test fails if
+  any Go code names a switch action or a generic service call. The link never
+  turns a plug on or off itself.
 - **The link page** only answers Home Assistant's ingress proxy. It has no
   scripts, a strict content security policy and a CSRF token on every form.
 
