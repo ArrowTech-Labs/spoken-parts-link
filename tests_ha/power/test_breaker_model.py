@@ -9,6 +9,8 @@ Square D QO and Siemens QP 15/20 A): 1.10 x about 180 s, 1.25 x 70 s, 1.5 x 27 s
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from custom_components.spoken_parts_power.engine import CircuitCfg, Engine, Plug, Timers
@@ -179,3 +181,81 @@ def test_a_cycling_ams_ht_is_the_first_to_go_in_a_real_overload():
     w.run(eng, 200)
     off = offs(eng)
     assert off and off[0][1] == "AMS1", off
+
+
+# ---- from the review of the breaker model ---------------------------------------------------
+
+
+def test_review_overloads_hours_apart_are_each_cut():
+    """1,600 W (under the rating) all the time, and a new 700 W print starts every 500 s.
+    Each start is cut on its own: the event closes once the circuit is back at or under
+    the rating, so the 3-round limit never builds up across separate overloads."""
+    w = Cadence()
+    w.add("P1", step((0, 800)), phase=0.0)
+    w.add("P2", step((0, 800)), phase=0.5)
+    plugs = [Plug("P1", "printer"), Plug("P2", "printer")]
+    for i, k in enumerate(("P3", "P4", "P5", "P6")):
+        w.add(k, step((0, 10), (100 + 500 * i, 700)), phase=1.0 + 0.25 * i)
+        plugs.append(Plug(k, "printer"))
+    eng = breaker_engine(w, plugs)
+    eng.feed_plug("P1", "printing", 50000, 0)
+    eng.feed_plug("P2", "printing", 50000, 0)
+    for k in ("P3", "P4", "P5", "P6"):
+        eng.feed_plug(k, "printing", 100, 0)
+    w.run(eng, 2000)
+    assert sorted(k for _, k in offs(eng)) == ["P3", "P4", "P5", "P6"], offs(eng)
+    assert not kinds(eng, "cant_protect")
+
+
+@pytest.mark.parametrize("r", [1.35, 1.65, 1.8, 1.95])
+def test_review_the_printer_is_cut_before_the_model_trips_even_after_a_heater(r):
+    w = Cadence()
+    tot = RATING * r
+    w.add("HT", step((0, 150)), phase=1.0)
+    w.add("P1", step((0, 300), (10, (tot - 150) / 2)), phase=0.0)
+    w.add("P2", step((0, 300), (10, (tot - 150) / 2)), phase=0.5)
+    eng = breaker_engine(w, [Plug("HT", "ams_ht"), Plug("P1", "printer"), Plug("P2", "printer")])
+    learned(eng, "HT", 150.0)
+    eng.feed_plug("P1", "printing", 9000, 0)
+    eng.feed_plug("P2", "printing", 1000, 0)
+    c, peak = eng.circuits["A"], [0.0]
+    tick = eng.tick
+
+    def watch(t):
+        tick(t)
+        peak[0] = max(peak[0], c.heat_pct())
+
+    eng.tick = watch
+    w.run(eng, 200)
+    assert "P2" in [k for _, k in offs(eng)], offs(eng)
+    assert peak[0] < 100.0, (r, peak[0])
+
+
+def test_review_heat_is_capped_at_the_trip_point():
+    """An uncuttable load at 1.05 x for 30 min (a breaker carries that): the estimate
+    stops at the trip point, so the circuit is not left 'hotter than a trip' for an hour."""
+    w = Cadence()
+    w.add("O", step((0, 1890), (1800, 0)), phase=0.0)
+    eng = breaker_engine(w, [Plug("O", "other")])
+    w.run(eng, 1800)
+    c = eng.circuits["A"]
+    assert c.heat_pct() <= 100.0
+    w.run(eng, 2400, start=1800.25)
+    assert c.heat_pct() < 15
+
+
+def test_review_the_breaker_keeps_its_heat_across_a_restart():
+    w = Cadence()
+    eng = two_printers(w, step((0, 60), (10, 1350)), step((0, 900)))
+    w.run(eng, 40)
+    c = eng.circuits["A"]
+    before = c.heat
+    assert before > 5
+    saved = eng.to_store(40)
+    eng2 = Engine(w, timers=Timers())
+    eng2.add_circuit(CircuitCfg(id="A", name="Upstairs", shed_w=1440.0, restore_w=1080.0,
+                                hard_w=1800.0), [Plug("H2D", "printer"), Plug("X2D", "printer")])
+    saved["circuits"]["A"]["heat_age"] = 30.0  # down for 30 s
+    saved["config"] = None
+    eng2.from_store(saved, 0.0)
+    assert abs(eng2.circuits["A"].heat - before * math.exp(-30 / 300)) < 0.01

@@ -350,6 +350,7 @@ class Circuit:
         self.shot_from = "WATCH"  # the state the printer path started from
         self.heat: float | None = None  # breaker model, in trip_heat units
         self.heat_at = 0.0
+        self.heat_over = 0.0  # (I/I_rated)^2 - pickup^2 held since the last heat tick
 
     # ---- sums ---------------------------------------------------------------------
     @staticmethod
@@ -651,14 +652,17 @@ class Circuit:
         return w / self.cfg.rating_w if self.cfg.rating_w > 0 else 0.0
 
     def _heat_tick(self, t: float) -> None:
-        if self.heat is None:  # no history (start or restart): a cold breaker
-            self.heat, self.heat_at = 0.0, t
-            return
-        dt = max(0.0, t - self.heat_at)
-        self.heat_at = t
         over = self.ratio(self.measured(t)) ** 2 - self.tm.pickup ** 2
-        if over > 0:
-            self.heat += over * dt
+        if self.heat is None:  # no history and nothing saved: a cold breaker
+            self.heat, self.heat_at, self.heat_over = 0.0, t, over
+            return
+        dt = min(max(0.0, t - self.heat_at), 10.0)  # a stalled loop adds no made-up heat
+        held = self.heat_over  # the load held since the last tick (sample and hold)
+        self.heat_at, self.heat_over = t, over
+        if held > 0:
+            # Capped at the trip point: past it the breaker would have tripped, so more
+            # estimated heat only means the estimate ran ahead of a real breaker.
+            self.heat = min(self.heat + held * dt, self.tm.trip_heat)
         else:
             self.heat *= math.exp(-dt / self.tm.cool_tau_s)
 
@@ -684,6 +688,9 @@ class Circuit:
         if share >= tm.printer_heat:
             return "printer"
         if share >= tm.heater_heat:
+            soon = self.trip_in_s(w)
+            if soon is not None and soon <= tm.lockout_max_s + tm.refresh_timeout_s + 3:
+                return "printer"  # no time for a heater-only round and its lockout first
             return "heater"
         return None
 
@@ -932,7 +939,9 @@ class Circuit:
         if not waiting:
             # The event stays open while a heater that used its tries is still off
             # (a person can say Try again). Nothing held: back to watching.
-            if s <= cfg.shed_w and not self.held():
+            # Breaker model: at or under the rating the breaker is not heating, so the
+            # event is over (the shed line no longer matters; review 3 #1).
+            if self.ratio(self.measured(t)) <= self.tm.pickup and not self.held():
                 if self.event_open:
                     self._close_event(t)
                 else:
@@ -1680,7 +1689,8 @@ class Engine:
                       for k, p in self.plugs.items()},
             "circuits": {cid: {"event": c.event, "event_open": c.event_open,
                                "rounds": c.rounds, "opened_age": round(t - c.opened_at, 1),
-                               "lost_print": c.lost_print}
+                               "lost_print": c.lost_print, "heat": round(c.heat or 0.0, 3),
+                               "heat_age": round(t - c.heat_at, 1)}
                          for cid, c in self.circuits.items()},
             "followups": {cid: [list(k) for k in v] for cid, v in self.open_followups.items()},
         }
@@ -1712,6 +1722,11 @@ class Engine:
             c.rounds = int(d.get("rounds") or 0)
             c.opened_at = t - float(d.get("opened_age") or 0)
             c.lost_print = bool(d.get("lost_print"))
+            # The breaker keeps its heat across a restart: cooled for the time it was down.
+            heat = float(d.get("heat") or 0.0)
+            age = max(0.0, float(d.get("heat_age") or 0.0))
+            c.heat = heat * math.exp(-age / self.tm.cool_tau_s)
+            c.heat_at, c.heat_over = t, 0.0
             if c.state != "OFF":
                 c.state, c.started_at = "STARTING", t
         self._entry(t, "engine_started", None, None, None,
