@@ -2,7 +2,7 @@
 
 from custom_components.spoken_parts_power.engine import Engine, Timers, validate_circuit
 
-from .world import World, farm, followups, kinds, ons, p2_starts, step
+from .world import legacy, World, farm, followups, kinds, ons, p2_starts, step
 
 CID = "11111111-1111-1111-1111-111111111111"
 
@@ -44,7 +44,7 @@ def test_guard_rails():
 
 def test_document_creates_a_live_circuit_that_reads_every_plug_first():
     act = Act()
-    eng = Engine(act)
+    eng = Engine(act, timers=legacy())
     res = eng.apply_config(doc(), 0)
     assert res["accepted"] and res["version"] == 1 and not res["errors"]
     c = eng.circuits[CID]
@@ -60,14 +60,14 @@ def test_document_creates_a_live_circuit_that_reads_every_plug_first():
 
 
 def test_bad_document_keeps_nothing_from_it():
-    eng = Engine(Act())
+    eng = Engine(Act(), timers=legacy())
     res = eng.apply_config(doc(shed_w=200), 0)
     assert res["errors"] and CID not in eng.circuits
 
 
 def test_protect_off_then_on():
     act = Act()
-    eng = Engine(act)
+    eng = Engine(act, timers=legacy())
     eng.apply_config(doc(protect=False), 0)
     assert eng.circuits[CID].state == "OFF"
     eng.apply_config(doc(version=2), 1)
@@ -89,7 +89,7 @@ def test_config_waits_for_the_event_to_end():
 
 
 def test_journal_sequence_and_ack():
-    eng = Engine(Act(), wall=lambda: "2026-11-15T10:00:00Z")
+    eng = Engine(Act(), wall=lambda: "2026-11-15T10:00:00Z", timers=legacy())
     eng.apply_config(doc(), 0)
     items = eng.journal.after(0)
     seqs = [e["seq"] for e in items]
@@ -182,7 +182,7 @@ def test_box_follows_the_event():
 
 
 def test_status_shape():
-    eng = Engine(Act())
+    eng = Engine(Act(), timers=legacy())
     eng.apply_config(doc(), 0)
     eng.on_power("00:0d:6f:00:00:00:00:01", 120, 1)
     st = eng.status(2)

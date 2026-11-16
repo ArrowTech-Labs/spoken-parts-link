@@ -1,8 +1,8 @@
 # Spoken Parts Power
 
 A Home Assistant integration that keeps a breaker from tripping. It adds up the
-power of the smart plugs on each circuit and, when the sum crosses the circuit's
-shed line, turns plugs off once, in this order:
+power of the smart plugs on each circuit and, when the breaker is really close to
+tripping (see below), turns plugs off once, in this order:
 
 1. AMS HT heaters and dryers that are drawing power,
 2. printers that are not printing,
@@ -12,11 +12,14 @@ It counts what it turned off as zero at once and looks again only after fresh
 readings arrive (at most 3 rounds per event), so stale readings cannot make it
 cut more. A print is only cut on fresh readings.
 
-The trip uses the circuit's short trip filter (2 s by default; at once over the
-hard line). Before a printer is turned off, every plug on the circuit is asked
-for its draw right now (a direct Zigbee read through Home Assistant), and the
-printer is turned off only if the fresh sum is still over the shed line
-(readings older than 5 s do not count). A heater or dryer that is in a
+Cuts follow the breaker, not a fixed line: the engine keeps an inverse-time
+(I^2 t) estimate of each breaker's heat from the measured amps, fitted to the fast
+side of real 15 A and 20 A trip curves. Nothing is cut at or under the breaker's
+rating. Above it, heaters and dryers go at 70 % of the trip heat, printers at 85 %,
+and anything at once at twice the rating. Before a printer is turned off, every
+plug on the circuit is asked for its draw right now (a direct Zigbee read through
+Home Assistant), and the printer is turned off only if the fresh readings still
+put the breaker in danger (readings older than 5 s do not count). A heater or dryer that is in a
 heating session counts at its learned draw even between its pulses, so it goes
 before any printer. Heaters and dryers come back
 on by themselves when there is room, then printers that were not printing. A

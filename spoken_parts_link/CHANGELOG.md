@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.7.3
+
+- Power protection (Spoken Parts Power 0.1.3) now only turns things off when the
+  breaker is really close to tripping. It keeps track of how warm each breaker
+  is getting from the measured amps, the way a real breaker heats up, fitted to
+  the fast side of real 15 A and 20 A breaker trip curves. A breaker carries its
+  full rating for as long as you like, so nothing is turned off at or under it.
+  Above it, AMS HT heaters and dryers go first when the breaker is getting warm,
+  printers only when a trip is close, and anything goes at once at twice the
+  rating. Two printers heating together are no longer turned off.
+- Before any printer is turned off, every plug is still asked for its power
+  right now over Zigbee.
+- The shed and hard lines on the Power page no longer turn things off by
+  themselves; the restore line still decides when heaters come back.
+- The link app itself is unchanged.
+
 ## 0.7.2
 
 - Power protection (Spoken Parts Power 0.1.2): the one-minute wait before a

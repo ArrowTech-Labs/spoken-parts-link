@@ -7,7 +7,18 @@ from __future__ import annotations
 
 import heapq
 
-from custom_components.spoken_parts_power.engine import CircuitCfg, Engine, Plug
+from custom_components.spoken_parts_power.engine import CircuitCfg, Engine, Plug, Timers
+
+# These scenario tests check the ladder, lockout, restore and 4C mechanics. Since the
+# breaker model (STEER-2) the trigger is the breaker's estimated heat; here it is set
+# to act as soon as the sum is over 80 % of the rating (the old shed line, no filter),
+# so the mechanics can be driven with the design's loads. The real trigger is tested
+# with the production timers in test_breaker_model.py.
+LEGACY = dict(pickup=0.8, heater_heat=0.0, printer_heat=0.0, landing_ratio=0.76)
+
+
+def legacy() -> Timers:
+    return Timers(**LEGACY)
 
 DT = 0.25
 
@@ -93,7 +104,7 @@ def cfg(**kw):
 
 
 def engine(w, plugs, c=None):
-    eng = Engine(w)
+    eng = Engine(w, timers=legacy())
     eng.add_circuit(c or cfg(), plugs)
     return eng
 
@@ -141,7 +152,7 @@ def followups(eng, kind=None):
 
 def doc_engine(w, circuits, plugs, version=1):
     """An engine set up from a config document, like production (lowercase addresses)."""
-    eng = Engine(w)
+    eng = Engine(w, timers=legacy())
     w.eng = eng
     eng.apply_config(doc(circuits, plugs, version), 0)
     return eng
@@ -154,3 +165,60 @@ def doc(circuits, plugs, version=1):
         base.update(c)
         cs.append(base)
     return {"version": version, "circuits": cs, "plugs": plugs}
+
+
+class Cadence(World):
+    """A world whose plugs report every `gap` seconds (staggered), not on a change."""
+
+    def __init__(self, gap=5.0):
+        super().__init__()
+        self.gap, self.phase = gap, {}
+        self.unanswered, self.muted = set(), set()  # re-reads not answered; reports stopped
+
+    def add(self, key, load, phase=0.0, **kw):
+        super().add(key, load, **kw)
+        self.phase[key] = phase
+
+    def read(self, key, t):
+        if key in self.silent:
+            return False
+        if key not in self.unanswered:
+            self.at(t + 0.3, lambda now: self.eng.on_power(key, self.true_w(key, now), now))
+        return True
+
+    def run(self, eng, until, script=(), start=0.0):
+        self.eng = eng
+        for when, fn in script:
+            self.at(when, fn)
+        t = start
+        while t <= until:
+            for key in self.loads:
+                if key in self.silent or key in self.muted:
+                    continue
+                k = (t - self.phase[key]) / self.gap
+                if t >= self.phase[key] and abs(k - round(k)) < 1e-6:
+                    w = self.true_w(key, t)
+                    self.at(t + 0.1, lambda now, kk=key, v=w, m=t: self.eng.on_power(kk, v, now, measured=m))
+            while self.q and self.q[0][0] <= t:
+                _, _, fn = heapq.heappop(self.q)
+                fn(t)
+            for p in eng.plugs.values():
+                if p.role == "printer" and not self.feed_dead:
+                    p.feed.at = t
+            eng.tick(t)
+            t = round(t + DT, 2)
+
+
+def ams_cycle(on_w=148.0, off_w=4.2, period=55.0, on_s=25.0, start=0.0, stop=1e9):
+    """An AMS HT drying: about 148 W for 25 s, about 4 W for 30 s, until `stop`."""
+
+    def f(t):
+        if t < start or t >= stop:
+            return 0.0
+        return on_w if (t - start) % period < on_s else off_w
+
+    return f
+
+
+def learned(eng, key, w=148.0, n=20):
+    eng.plugs[key].hist = [w] * n

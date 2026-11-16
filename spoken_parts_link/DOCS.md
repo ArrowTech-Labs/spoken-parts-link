@@ -332,9 +332,16 @@ not by the link.
   order: AMS HT heaters and dryers, then printers that are not printing, then
   the print with the least filament on its plate. A print is only turned off
   when the readings are fresh and that is the only way to stay under the line.
+- Nothing is turned off until the breaker is really close to tripping. The
+  integration keeps track of how warm each breaker is getting from the measured
+  amps, like a real breaker, and a breaker carries its full rating for as long
+  as you like. Above it, heaters and dryers go first when the breaker is getting
+  warm, printers only when a trip is close, anything at once at twice the
+  rating. Two printers heating together are not turned off. (0.7.3)
 - Before any printer is turned off, every plug on the circuit is asked for its
   draw right now over Zigbee, and the printer stays on if those fresh readings
-  are under the line. Readings older than 5 seconds do not count. (0.7.2)
+  show the breaker is not in danger. Readings older than 5 seconds do not
+  count. (0.7.2)
 - An AMS HT or dryer that is drying counts at its usual draw even between its
   heating pulses, so it is always turned off before a printer. (0.7.1)
 - Heaters, dryers and printers that were not printing come back on by
