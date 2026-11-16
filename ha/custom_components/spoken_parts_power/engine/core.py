@@ -21,6 +21,18 @@ ATS-SP-POWER-FIX-1), with Marc's answers Q-40 to Q-42:
   reporting interval (`fresh_s`, 5 s) counts. A printer is cut only if the
   circuit is really over the shed line on those fresh numbers. The trigger
   itself is not slowed down (Marc, Q-41: no slower trigger).
+- Breaker model (Marc, STEER-2, Nov 15, 2026: "only make cuts when the breaker is
+  ACTUALLY in danger of tripping soon"). The engine keeps an inverse-time (I^2 t)
+  estimate of each breaker's heat from the circuit's measured amps: above the
+  breaker's rating (`pickup` = 1.0 x) heat builds at (I/I_rated)^2 - 1 per second;
+  at or under it, it cools with `cool_tau_s`. The breaker is taken to trip at
+  `trip_heat`, fitted to the fast side of real 15 A / 20 A trip curves (Square D
+  QO, Siemens QP; ATS-SP-POWER-FIX-1 BREAKER-RESEARCH.md): 1.1 x in about 157 s,
+  1.25 x 59 s, 1.5 x 26 s, 2 x 11 s, 3 x 4 s. Heaters and dryers go when the heat
+  reaches `heater_heat` of that, printers at `printer_heat`, anything at once at
+  `instant_ratio` x the rating. Two printers heating together (about 1.08 x for a
+  minute or so) reach about half of it, so nothing is cut. The configured shed and
+  hard lines no longer trigger cuts; restores still use the restore line.
 - C. A heater or dryer in an active heating session (it drew at least
   `restart_dry_w` within `heater_session_s`) counts at its learned draw in the
   line-up, even in the off half of its cycle, so it goes before any printer.
@@ -60,6 +72,15 @@ class Timers:
     """DESIGN 6 to 8 and EVENT-LIFECYCLE 4. Seconds and watts."""
 
     hard_confirm_s: float = 0.25
+    # Breaker model (STEER-2): inverse-time I^2 t, fitted to the fast side of the trip
+    # curves in BREAKER-RESEARCH.md (40 C, cold start, worst of QO and QP 15/20 A).
+    pickup: float = 1.0  # heat builds only above this multiple of the rating
+    trip_heat: float = 33.0  # (I/I_rated)^2 - pickup^2, integrated over seconds
+    cool_tau_s: float = 300.0  # cooling at or under the pickup (research: about 5 min)
+    heater_heat: float = 0.70  # heaters and dryers go at this share of the trip heat
+    printer_heat: float = 0.85  # printers go at this share of the trip heat
+    instant_ratio: float = 2.0  # at or over this multiple of the rating: at once
+    landing_ratio: float = 0.95  # a cut aims to land at this share of the rating
     # Fix A: the plugs report about every 5 s under load. Older readings never
     # count when a printer may be cut (they were 10 s before Nov 15, 2026).
     fresh_s: float = 5.0
@@ -327,6 +348,8 @@ class Circuit:
         self.refresh_keys: list[str] = []
         self.shot_tier = 3  # the highest tier this round's decision may cut
         self.shot_from = "WATCH"  # the state the printer path started from
+        self.heat: float | None = None  # breaker model, in trip_heat units
+        self.heat_at = 0.0
 
     # ---- sums ---------------------------------------------------------------------
     @staticmethod
@@ -452,7 +475,7 @@ class Circuit:
         if self.state == "OFF":
             return []
         cands, _ = self.ladder(t)
-        need = max(self.total(t), self.cfg.shed_w + 1) - self.cfg.target_w
+        need = max(self.measured(t), self.cfg.rating_w * self.tm.pickup + 1) - self.landing_w
         pick, ok = self._prefix(cands, need)
         return [c.plug.key for c in (self._trim(pick, need) if ok else pick)]
 
@@ -460,6 +483,7 @@ class Circuit:
     def tick(self, t: float) -> None:
         tm = self.tm
         now_w = self.total(t)
+        self._heat_tick(t)
         self.samples.append((t, now_w))
         if self.state not in ("BLIND", "STARTING"):  # untrusted sums never enter the hold window
             self.hist.append((t, now_w))
@@ -616,21 +640,72 @@ class Circuit:
         self.under_since = None
         self.hist = []
 
+    # ---- breaker model (STEER-2) -----------------------------------------------------
+    def measured(self, t: float, verified_only: bool = False) -> float:
+        """Watts the breaker really carries: readings only (no booked restore)."""
+        return self.cfg.unmetered_w + sum(
+            0.0 if p.zeroed else p.w for p in self.plugs.values()
+            if not verified_only or self._verified(p, t))
+
+    def ratio(self, w: float) -> float:
+        return w / self.cfg.rating_w if self.cfg.rating_w > 0 else 0.0
+
+    def _heat_tick(self, t: float) -> None:
+        if self.heat is None:  # no history (start or restart): a cold breaker
+            self.heat, self.heat_at = 0.0, t
+            return
+        dt = max(0.0, t - self.heat_at)
+        self.heat_at = t
+        over = self.ratio(self.measured(t)) ** 2 - self.tm.pickup ** 2
+        if over > 0:
+            self.heat += over * dt
+        else:
+            self.heat *= math.exp(-dt / self.tm.cool_tau_s)
+
+    def heat_pct(self) -> float:
+        """The breaker's estimated heat as a share of its trip point."""
+        return round(100.0 * (self.heat or 0.0) / self.tm.trip_heat, 1)
+
+    def trip_in_s(self, w: float) -> float | None:
+        """Seconds to the model's trip at a steady w from the current heat (None: never)."""
+        over = self.ratio(w) ** 2 - self.tm.pickup ** 2
+        if over <= 0:
+            return None
+        return max(0.0, (self.tm.trip_heat - (self.heat or 0.0)) / over)
+
+    def danger(self, w: float) -> str | None:
+        """"instant", "printer", "heater" or None for a load of w now."""
+        tm, r = self.tm, self.ratio(w)
+        if r >= tm.instant_ratio:
+            return "instant"
+        if r <= tm.pickup:
+            return None  # a breaker carries this for good: nothing is in danger
+        share = (self.heat or 0.0) / tm.trip_heat
+        if share >= tm.printer_heat:
+            return "printer"
+        if share >= tm.heater_heat:
+            return "heater"
+        return None
+
+    @property
+    def landing_w(self) -> float:
+        return self.cfg.rating_w * self.tm.landing_ratio
+
     def _reset_window(self, t: float) -> None:
         self.window_from = t
         self.samples = [(t, self.total(t))]
 
     def _tripped(self, t: float) -> str | None:
-        """"hard", "shed" or None."""
-        if self.total(t) >= self.cfg.hard_w:  # hard line: two looks 250 ms apart, no window
+        """"instant", "printer", "heater" or None, from the breaker model (STEER-2)."""
+        kind = self.danger(self.measured(t))
+        if kind == "instant":  # two looks 250 ms apart
             if self.hard_since is None:
                 self.hard_since = t
             if t - self.hard_since >= self.tm.hard_confirm_s:
-                return "hard"
-        else:
-            self.hard_since = None
-        m = self.mean(t)
-        return "shed" if m is not None and m > self.cfg.shed_w else None
+                return "instant"
+            return None
+        self.hard_since = None
+        return kind
 
     def _may_trip(self, t: float, kind: str) -> bool:
         """When only printers are left to cut and the last look could not check some
@@ -638,9 +713,11 @@ class Circuit:
         can_sacrifice = self.state != "OVER" and self.rounds < self.tm.max_rounds
         cands, _ = self.ladder(t, 3 if can_sacrifice else 2)
         printers = [c for c in cands if c.tier >= 2]
+        if kind == "heater":  # the early level only ever turns heaters and dryers off
+            return any(c.tier == 1 for c in cands)
         if any(c.tier == 1 for c in cands) or not printers:
             return True
-        if self.wait_for and self.total(t, verified_only=True) <= self.cfg.shed_w and all(
+        if self.wait_for and self.danger(self.measured(t, verified_only=True)) is None and all(
                 (p.at, p.reachable) == self.wait_for[k]
                 for k, p in self.plugs.items() if k in self.wait_for):
             # Nothing new from the plugs it could not check, and the plugs it can check
@@ -655,15 +732,14 @@ class Circuit:
                    if k in self.plugs and self.plugs[k].relay == "on" and not self.plugs[k].zeroed)
 
     # ---- one shot (DESIGN 6.4 to 6.10) --------------------------------------------------
-    def _trip(self, t: float, kind: str = "shed") -> None:
+    def _trip(self, t: float, kind: str = "printer") -> None:
         cfg, tm = self.cfg, self.tm
-        s_now, m = self.total(t), self.mean(t)
-        judged = max(s_now, m or 0.0)
+        s_now = judged = self.measured(t)
         can_sacrifice = self.state != "OVER" and self.rounds < tm.max_rounds  # rule 6
         cands, skipped = self.ladder(t, 3 if can_sacrifice else 2)
-        need = judged - cfg.target_w
+        need = judged - self.landing_w
         heaters = [c for c in cands if c.tier == 1]
-        printers = [c for c in cands if c.tier >= 2]
+        printers = [c for c in cands if c.tier >= 2] if kind != "heater" else []
         if not heaters and not printers:
             if not self.over_logged:
                 self.over_logged = True
@@ -677,17 +753,23 @@ class Circuit:
         self.rounds += 1
         self.over_logged = False
         self.hard_since = None
+        trip_in = self.trip_in_s(s_now)
         self._log(t, "trip", round=self.rounds, sum=round(judged), sum_now=round(s_now),
-                  shed_w=cfg.shed_w, target=cfg.target_w, need=round(need), line=kind,
+                  shed_w=cfg.shed_w, target=round(self.landing_w), need=round(need), line=kind,
+                  ratio=round(self.ratio(s_now), 3), heat_pct=self.heat_pct(),
+                  trip_in_s=None if trip_in is None else round(trip_in),
                   ladder=[[c.plug.key, c.tier, round(c.w), c.value, c.note] for c in cands],
                   skipped=[list(s) for s in skipped])
         pick, ok = self._prefix(heaters, need)
         self.fired, self.outcome, self.decide_at = [], "ok", None
-        if ok:  # the common case: heaters only, on the fast trigger
+        if ok:  # the common case: heaters only
             self._fire(t, self._trim(pick, need))
             self._start_lockout(t)
             return
         self._fire(t, heaters)  # every heater is in any larger plan
+        if kind == "heater":  # the early level: heaters only; printers wait for more heat
+            self._start_lockout(t)
+            return
         if not printers:
             self.outcome = "cant_reach_target"
             self._start_lockout(t)
@@ -717,11 +799,14 @@ class Circuit:
                       if not self._verified(p, t) and self.eff(p, t) > 0]
         cands = [c for c in self.ladder(t, self.shot_tier)[0]
                  if c.tier >= 2 and self._verified(c.plug, t)]
-        need = s_ver - cfg.target_w
-        hard = s_ver >= cfg.hard_w
+        need = s_ver - self.landing_w
+        fresh_danger = self.danger(s_ver)
+        hard = fresh_danger == "instant"
         pick: list[Cand] = []
-        if s_ver <= cfg.shed_w:  # fix A: under the shed line on fresh numbers: no printer is cut
-            if self.total(t) <= cfg.shed_w:
+        if fresh_danger not in ("printer", "instant"):
+            # Fix A and STEER-2: on the fresh readings the breaker is not in danger: no
+            # printer is cut.
+            if self.danger(self.measured(t)) not in ("printer", "instant"):
                 self.outcome = "ok"
             elif unverified and all(self.plugs[k].reachable for k in unverified):
                 # A plug that answers only missed its re-read: look again once it has
@@ -734,8 +819,8 @@ class Circuit:
             pick, ok = self._prefix(cands, need)
             if ok:
                 pick = self._trim(pick, need)
-            else:  # the target cannot be reached: settle for the hard line
-                need_h = s_ver - cfg.hard_w
+            else:  # the landing cannot be reached: settle for under the pickup
+                need_h = s_ver - cfg.rating_w * self.tm.pickup
                 pick, ok_h = self._prefix(cands, need_h) if need_h > 0 else ([], True)
                 if need_h > 0 and not ok_h:
                     pick, self.outcome = [], "cant_protect"
@@ -744,6 +829,7 @@ class Circuit:
         self._log(t, "sacrifice_decision", verified_sum=round(s_ver), need=round(need),
                   unverified=unverified, plugs=[c.plug.key for c in pick], outcome=self.outcome,
                   values=[[c.plug.key, c.value] for c in cands], hard=hard,
+                  ratio=round(self.ratio(s_ver), 3), heat_pct=self.heat_pct(),
                   answered=self._answered(), waited_s=round(t - (self.refresh_at or t), 2))
         if self.outcome == "cant_protect":
             self._followup(t, "cant_protect", True, sum=round(self.total(t)))

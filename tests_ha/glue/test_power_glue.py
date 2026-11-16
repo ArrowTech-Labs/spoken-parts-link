@@ -127,6 +127,11 @@ async def test_config_flow_single_entry(hass: HomeAssistant, zha) -> None:
 async def test_inventory_hello_config_and_a_real_shed(hass: HomeAssistant, zha, hass_ws_client) -> None:
     entry = await setup(hass)
     rt = entry.runtime_data
+    # This test is about the glue (inventory, websocket, the switch call). The breaker
+    # model is tested in tests_ha/power/test_breaker_model.py; here it acts as soon as
+    # the sum is over 80 % of the rating, like the old shed line.
+    for k, v in {"pickup": 0.8, "heater_heat": 0.0, "printer_heat": 0.0, "landing_ratio": 0.76}.items():
+        setattr(rt.engine.tm, k, v)
     assert set(rt.inventory) == {HT, PR}, "only THIRDREALITY 3RSP02064Z plugs"
     assert rt.inventory[HT]["ents"]["switch"] == "switch.ams_ht_plug"
     assert rt.inventory[HT]["ents"]["power"] == "sensor.ams_ht_plug_power"

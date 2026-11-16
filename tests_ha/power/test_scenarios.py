@@ -178,7 +178,7 @@ def test_s10_double_trip_in_lockout():
     trips, lock = kinds(eng, "trip"), kinds(eng, "lockout_end")
     assert len(trips) == 2, len(trips)
     assert not [c for c in eng.commands if trips[0][0] < c[0] < lock[0][0]], "no command inside the lockout"
-    assert trips[1][0] >= lock[0][0] + 2.0 - 1e-6, "needs a full fresh sustain window"
+    assert trips[1][0] >= lock[0][0] - 1e-6, "nothing is evaluated inside the lockout"
     second = [k for t, k in offs(eng) if t >= trips[1][0]]
     assert second == ["P2"], second
 
@@ -214,16 +214,8 @@ def test_s11_breaker_trip_and_return():
     assert [d["open"] for _, d in nop] == [True, False]
 
 
-def test_s12_hard_line_is_instant_and_blips_are_ignored():
-    """A 1 s blip over the shed line does nothing. A jump over the breaker's rating acts on the next look."""
-    w = World()
-    w.add("P1", step((0, 600), (30, 1500), (31, 600), (80, 1900)))
-    w.add("HT1", step((0, 165)))
-    eng = engine(w, [Plug("P1", "printer"), Plug("HT1", "ams_ht", peak_w=180)])
-    eng.feed_plug("P1", "printing", 5000, 0)
-    w.run(eng, 100)
-    trips = kinds(eng, "trip")
-    assert len(trips) == 1 and 80 <= trips[0][0] <= 81, trips
+# s12 (blips are ignored, a big overload acts at once) is in test_breaker_model.py with
+# the production breaker model.
 
 
 def test_s15_flip_flop_brake():

@@ -4,6 +4,7 @@ One test (or more) per finding; the number is the review's."""
 from custom_components.spoken_parts_power.engine import Engine, Plug
 
 from .world import (
+    legacy,
     World,
     doc,
     doc_engine,
@@ -53,7 +54,7 @@ def test_1_late_high_report_after_confirm_needs_a_reread_and_cuts_no_print():
 
 def test_1_report_measured_before_the_confirm_is_ignored():
     act = Act()
-    eng = Engine(act)
+    eng = Engine(act, timers=legacy())
     eng.apply_config(doc([{"id": "A"}], [{"ieee": "h", "role": "ams_ht", "circuit": "A"}]), 0)
     p = eng.plugs["h"]
     p.relay, p.shed_kind, p.zeroed, p.fired_at, p.confirmed_at = "off", "heater", True, 10, 10.3
@@ -243,7 +244,7 @@ def test_8_moving_a_plug_waits_until_both_circuits_are_quiet():
 
 # 9 -------------------------------------------------------------------------------------
 def test_9_a_valid_reading_taken_after_it_went_away_marks_the_plug_reachable():
-    eng = Engine(Act())
+    eng = Engine(Act(), timers=legacy())
     eng.apply_config(doc([{"id": "A"}], [{"ieee": "h", "role": "ams_ht", "circuit": "A"}]), 0)
     eng.on_reachable("h", False, 10)
     eng.on_power("h", 50, 12, measured=9)
@@ -313,7 +314,7 @@ def test_12_restores_strictly_heaters_first():
 
 
 def test_12_booked_watts_are_never_verified_readings():
-    eng = Engine(Act())
+    eng = Engine(Act(), timers=legacy())
     eng.apply_config(doc([{"id": "A"}], [{"ieee": "h", "role": "ams_ht", "circuit": "A"}]), 0)
     p = eng.plugs["h"]
     p.w, p.at, p.booked_w, p.booked_until = 0.0, 10.0, 500.0, 100.0
@@ -351,7 +352,7 @@ def test_A_blind_upgrades_to_no_power_when_plugs_fall_silent_one_after_another()
 
 # B (cross-repo check) --------------------------------------------------------------------
 def test_B_rejected_circuit_is_reported_in_status_errors():
-    eng = Engine(Act())
+    eng = Engine(Act(), timers=legacy())
     d = doc([{"id": "A"}, {"id": "B", "restore_w": 1500}],
             [{"ieee": "h", "role": "ams_ht", "circuit": "A"}])
     res = eng.apply_config(d, 0)
