@@ -216,6 +216,21 @@ async def test_person_command_is_refused_for_a_plug_the_engine_did_not_turn_off(
     await hass.config_entries.async_unload(entry.entry_id)
 
 
+async def test_make_room_request_is_accepted_by_the_schema_and_switches_nothing_now(
+        hass: HomeAssistant, zha, hass_ws_client) -> None:
+    """Studio Q-73 (0.1.4): the link may send make_room with its watts. The engine first
+    re-reads the plugs, so nothing is switched by the command itself."""
+    entry = await setup(hass)
+    client = await hass_ws_client(hass)
+    await ws(client, type="spoken_parts_power/config", config=config())
+    res = await ws(client, type="spoken_parts_power/command",
+                   request={"id": "m1", "kind": "make_room", "plug": PR, "by": "Kim",
+                            "need_w": 1320, "booked_w": 0})
+    assert res["result"] in ("pending", "refused")
+    assert not [c for c in zha.calls if c[0] == "switch"]
+    await hass.config_entries.async_unload(entry.entry_id)
+
+
 async def test_reading_marks_plug_reachable_and_measured_time_is_used(hass: HomeAssistant, zha,
                                                                      hass_ws_client) -> None:
     entry = await setup(hass)

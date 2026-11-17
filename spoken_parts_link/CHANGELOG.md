@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.7.4
+
+- Make room (Spoken Parts Power 0.1.4). When Spoken Parts would hold a print
+  only because the printer's heat up would take its circuit past the breaker's
+  full rating, it can ask Home Assistant to make room. The integration reads
+  every plug on the circuit again, then pauses the AMS HT heaters and dryers
+  that are drying on that circuit, the same ones the power watch would turn off
+  first, as many as it takes. It never pauses a printer, a plug marked "never
+  turn off" or other equipment, and it pauses nothing if pausing all of them
+  would not be enough. They come back on, one at a time, once the printer has
+  heated up, or after 10 minutes if the print was not started. A person still
+  sends the file.
+- Hot panel. A circuit can be marked as having its breaker panel in a hot space
+  (an attic or a garage in summer). The breaker model then counts the breaker
+  at 95 % of its rating, as a breaker at about 50 C carries. Off by default,
+  which is exactly the model of 0.7.3.
+- The link app forwards the new make room request with its watts. It has no
+  other change.
+
 ## 0.7.3
 
 - Power protection (Spoken Parts Power 0.1.3) now only turns things off when the

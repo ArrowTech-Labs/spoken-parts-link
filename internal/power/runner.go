@@ -23,6 +23,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"os"
 	"strings"
 	"sync"
@@ -518,13 +519,33 @@ func (r *Runner) sync(ctx context.Context, gen uint64) {
 			break
 		}
 		req := map[string]any{"id": cut(q.ID, 64), "kind": q.Kind, "plug": cut(q.Plug, 64), "by": cut(q.By, 80)}
-		if q.Kind != "power_on" && q.Kind != "retry" {
+		switch q.Kind {
+		case "power_on", "retry":
+		case "make_room":
+			// Studio Q-73: pause drying heaters for a printer's heat up. The engine
+			// decides on fresh readings; without the watts it refuses.
+			if q.NeedW == nil || !finite(*q.NeedW) || *q.NeedW <= 0 || *q.NeedW > 10000 {
+				continue
+			}
+			booked := 0.0
+			if q.BookedW != nil {
+				// A bad booked value would understate the load: drop the request.
+				if !finite(*q.BookedW) || *q.BookedW < 0 || *q.BookedW > 10000 {
+					continue
+				}
+				booked = *q.BookedW
+			}
+			req["need_w"] = *q.NeedW
+			req["booked_w"] = booked
+		default:
 			continue
 		}
 		// The engine decides, journals its answer, and that entry goes up.
 		_ = r.call(ctx, "spoken_parts_power/command", map[string]any{"request": req}, nil)
 	}
 }
+
+func finite(f float64) bool { return !math.IsNaN(f) && !math.IsInf(f, 0) }
 
 func isStatus(err error, code int) bool {
 	var e *api.Error

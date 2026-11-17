@@ -338,6 +338,15 @@ not by the link.
   as you like. Above it, heaters and dryers go first when the breaker is getting
   warm, printers only when a trip is close, anything at once at twice the
   rating. Two printers heating together are not turned off. (0.7.3)
+- A circuit whose breaker panel is in a hot space (an attic or a garage in
+  summer) can be marked "hot panel" in Spoken Parts. The breaker is then counted
+  at 95 % of its rating. (0.7.4)
+- Make room: when a print would be held only because the printer's heat up
+  would pass the breaker's full rating, Spoken Parts can ask the integration to
+  pause the AMS HT heaters and dryers that are drying on that circuit, as many
+  as it takes, never a printer and never a plug marked "never turn off". They
+  come back on once the printer has heated up, or after 10 minutes. If a dry
+  does not pick up again, Spoken Parts asks a person to restart it. (0.7.4)
 - Before any printer is turned off, every plug on the circuit is asked for its
   draw right now over Zigbee, and the printer stays on if those fresh readings
   show the breaker is not in danger. Readings older than 5 seconds do not
