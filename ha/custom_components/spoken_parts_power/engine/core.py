@@ -125,6 +125,7 @@ class Timers:
     share_max_s: float = 1800.0
     share_low_s: float = 30.0
     share_start_w: float = 400.0  # a rise this big over the draw at the pause is a start
+    share_tell_s: float = 1800.0  # a pause still off this long: a person is told (a follow-up)
 
 
 @dataclass
@@ -1082,6 +1083,8 @@ class Circuit:
         """None: accepted, answered after the re-read. False: refused now."""
         if p.role != "printer":
             return False, "Make room is for a printer."
+        if p.relay != "on" or p.zeroed or not p.reachable:
+            return False, "That printer's plug is off or not answering, so nothing was paused."
         if not self.eng.switching_allowed:
             return False, "Switching is turned off in Home Assistant, so nothing can be paused."
         if self.state != "WATCH":
@@ -1176,6 +1179,7 @@ class Circuit:
             q.retried = q.verify_sent = False
             q.shed_kind, q.shed_at, q.share_for = "share", t, p.key
             q.blocked_logged, q.booked_until, q.dry_check_at = False, -1e9, None
+            q.tries, q.gave_up = 0, False
         for c in pick:
             self.eng._send(t, c.plug, "off")
         paused = [[c.plug.key, round(c.w)] for c in pick]
@@ -1183,7 +1187,7 @@ class Circuit:
         if b is None:
             self.shares[p.key] = {"since": t, "w0": own, "was": p.feed.state, "started": False,
                                   "started_at": None, "peak": 0.0, "low_since": None,
-                                  "request": r["id"]}
+                                  "request": r["id"], "fed": False}
         self._log(t, "make_room", plug=p.key, request=r["id"], outcome="room_made",
                   paused=paused, freed=round(sum(c.w for c in pick)),
                   why="the heaters and dryers the power watch would turn off first", **numbers)
@@ -1209,13 +1213,15 @@ class Circuit:
                 b["was"] not in ("starting", "printing")
                 or (f.start_t is not None and f.start_t >= b["since"]))
             if fed or p.w >= b["w0"] + tm.share_start_w:
-                b["started"], b["started_at"] = True, t
+                b["started"], b["started_at"], b["fed"] = True, t, fed
             elif t - b["since"] >= tm.share_wait_s:
                 return "not_started"
             else:
                 return None
         b["peak"] = max(b["peak"], p.w)
-        if f.state in NOT_PRINTING and t - b["started_at"] >= tm.share_low_s:
+        fresh_feed = t - f.at <= tm.feed_stale_s
+        if b.get("fed") and fresh_feed and f.state in NOT_PRINTING \
+                and t - b["started_at"] >= tm.share_low_s:
             return "print_ended"
         if b["peak"] >= b["w0"] + tm.share_start_w and p.w <= b["peak"] / 2:
             if b["low_since"] is None:
@@ -1225,17 +1231,27 @@ class Circuit:
         else:
             b["low_since"] = None
         if f.high_until is not None and f.start_t is not None and f.start_t >= b["since"] \
-                and t >= f.high_until:
+                and t >= f.high_until and p.w < b["peak"] * 0.75:
             return "heat_up_time_over"
         return None
 
     def _share_back(self, t: float) -> None:
         """Paused heaters come back one at a time once their printer's booking is over,
         when the hold window has room for them (the watch's restore rule)."""
+        tm = self.tm
+        for q in self.plugs.values():  # still off long after its pause: tell a person once
+            if q.shed_kind == "share" and q.relay == "off" and not q.gave_up \
+                    and t - q.shed_at >= tm.share_tell_s:
+                q.gave_up = True
+                self._log(t, "share_back_late", plug=q.key, paused_s=round(t - q.shed_at),
+                          tries=q.tries)
+                self._followup(t, "restore_blocked", True, plug=q.key, shared=True,
+                               paused_s=round(t - q.shed_at))
         paused = sorted(
             (p for p in self.plugs.values()
              if p.shed_kind == "share" and p.relay == "off" and not p.zeroed
-             and not p.failed_open and p.controllable and p.share_for not in self.shares),
+             and not p.failed_open and p.controllable and p.reachable
+             and p.tries < tm.restore_tries and p.share_for not in self.shares),
             key=lambda p: (p.shed_at, p.key))
         if not paused:
             return
@@ -1248,8 +1264,9 @@ class Circuit:
                 self._log(t, "share_back_blocked", plug=p.key, hold_max=round(hold_max),
                           needs=round(need), room=round(self.cfg.target_w - hold_max))
             return
+        p.tries += 1  # a plug that will not come back on is not asked forever
         self._turn_on(t, p, need, hold_max, self.total(t), "share_back",
-                      paused_for=p.share_for or "", paused_s=round(t - p.shed_at))
+                      paused_for=p.share_for or "", paused_s=round(t - p.shed_at), tries=p.tries)
 
     # ---- helpers --------------------------------------------------------------------
     def _open_event(self, t: float) -> None:
@@ -1649,9 +1666,11 @@ class Engine:
                         p.dry_was_w = max(p.shed_w, p.learned_w)
                         p.dry_check_at = t + self.tm.restart_dry_s
                     elif kind == "share":  # Q-73: did the dry pick up again?
+                        c._followup(t, "restore_blocked", False, plug=key)
                         p.dry_was_w = max(p.shed_w, p.learned_w)
                         p.dry_check_at = t + self.tm.restart_dry_s
                         p.dry_shared, p.share_for = True, None
+                        p.tries, p.gave_up = 0, False
                 p.person_on = False
             else:
                 p.booked_until = t
@@ -1699,7 +1718,7 @@ class Engine:
                 c._followup(t, "sacrificed", False, plug=key, power_back=True)
             elif c and was == "idle":
                 c._followup(t, "idle_off", False, plug=key)
-            elif c and was == "heater":
+            elif c and was in ("heater", "share"):
                 c._followup(t, "restore_blocked", False, plug=key)
         else:
             p.dry_check_at = None
@@ -1934,7 +1953,8 @@ class Engine:
 
     # ---- storage (survives a Home Assistant restart) ------------------------------------
     STORE_FIELDS = ("shed_kind", "shed_w", "shed_value", "shed_job", "tries", "hold_mult",
-                    "gave_up", "failed_open", "hist", "idle_hist", "starts", "relay")
+                    "gave_up", "failed_open", "hist", "idle_hist", "starts", "relay",
+                    "share_for")
 
     def to_store(self, t: float) -> dict[str, Any]:
         return {
@@ -1950,7 +1970,15 @@ class Engine:
             "circuits": {cid: {"event": c.event, "event_open": c.event_open,
                                "rounds": c.rounds, "opened_age": round(t - c.opened_at, 1),
                                "lost_print": c.lost_print, "heat": round(c.heat or 0.0, 3),
-                               "heat_age": round(t - c.heat_at, 1)}
+                               "heat_age": round(t - c.heat_at, 1),
+                               # Q-73: the room booked for each printer survives a restart.
+                               "shares": {k: {**{f: b[f] for f in ("w0", "was", "started",
+                                                                    "peak", "request")},
+                                              "fed": b.get("fed", False),
+                                              "age": round(t - b["since"], 1),
+                                              "started_age": None if b["started_at"] is None
+                                              else round(t - b["started_at"], 1)}
+                                          for k, b in c.shares.items()}}
                          for cid, c in self.circuits.items()},
             "followups": {cid: [list(k) for k in v] for cid, v in self.open_followups.items()},
         }
@@ -1987,6 +2015,17 @@ class Engine:
             age = max(0.0, float(d.get("heat_age") or 0.0))
             c.heat = heat * math.exp(-age / self.tm.cool_tau_s)
             c.heat_at, c.heat_over = t, 0.0
+            for k, b in (d.get("shares") or {}).items():
+                try:
+                    c.shares[k] = {
+                        "since": t - float(b.get("age") or 0), "w0": float(b.get("w0") or 0),
+                        "was": str(b.get("was") or ""), "started": bool(b.get("started")),
+                        "started_at": None if b.get("started_age") is None
+                        else t - float(b["started_age"]),
+                        "peak": float(b.get("peak") or 0), "low_since": None,
+                        "request": str(b.get("request") or ""), "fed": bool(b.get("fed"))}
+                except (TypeError, ValueError, AttributeError):
+                    continue
             if c.state != "OFF":
                 c.state, c.started_at = "STARTING", t
         self._entry(t, "engine_started", None, None, None,

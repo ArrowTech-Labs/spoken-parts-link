@@ -527,11 +527,15 @@ func (r *Runner) sync(ctx context.Context, gen uint64) {
 			if q.NeedW == nil || !finite(*q.NeedW) || *q.NeedW <= 0 || *q.NeedW > 10000 {
 				continue
 			}
-			req["need_w"] = *q.NeedW
 			booked := 0.0
-			if q.BookedW != nil && finite(*q.BookedW) && *q.BookedW >= 0 && *q.BookedW <= 10000 {
+			if q.BookedW != nil {
+				// A bad booked value would understate the load: drop the request.
+				if !finite(*q.BookedW) || *q.BookedW < 0 || *q.BookedW > 10000 {
+					continue
+				}
 				booked = *q.BookedW
 			}
+			req["need_w"] = *q.NeedW
 			req["booked_w"] = booked
 		default:
 			continue

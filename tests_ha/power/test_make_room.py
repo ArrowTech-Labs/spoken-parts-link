@@ -66,7 +66,7 @@ def test_room_already_nothing_is_paused():
     assert not offs(eng)
 
 
-def test_short_pauses_the_drying_ams_units_never_a_printer():
+def test_short_by_more_than_the_drying_ams_units_free_pauses_nothing():
     """X2D printing at 600 W, two AMS HT drying (148 W each, between pulses counted at
     their learned draw): 600 + 296 - 40 + 1,320 = 2,176 W > 1,800 W. Short 376 W: pausing
     both AMS (296 W) is not enough, so nothing is paused."""
@@ -123,7 +123,7 @@ def test_only_what_is_needed_smallest_first_like_the_watch():
     assert [k for k, _ in a[0]["paused"]] == ["DRY1"]
 
 
-def test_refused_while_the_watch_is_busy_or_switching_is_off():
+def test_refused_when_switching_is_off():
     w = Cadence()
     eng = upstairs(w, x2d=420.0, heaters=[ams("AMS1")])
     eng.switching_allowed = False
@@ -204,7 +204,7 @@ def test_a_dry_that_does_not_pick_up_opens_restart_the_dry_marked_shared():
     assert fu[0]["open"] is True
 
 
-def test_the_engine_keeps_the_pause_across_a_restart():
+def test_to_store_keeps_the_pause():
     w = Cadence()
     eng = upstairs(w, x2d=300.0, heaters=[ams("AMS1"), ams("AMS2"), ams("AMS3")])
     w.run(eng, 75, [(T_ASK, ask(eng))])
@@ -252,3 +252,103 @@ def test_status_is_as_before_when_sharing_and_hot_panel_are_unused():
     w.run(eng, 30)
     st = eng.status(30)["circuits"][0]
     assert "sharing" not in st and "trip_rating_w" not in st
+
+
+# ---- the independent review's points ----------------------------------------------------------
+
+
+def test_refused_while_the_watch_is_acting():
+    """A trip on the circuit while the request waits for its re-read: refused, nothing paused."""
+    w = Cadence()
+    eng = upstairs(w, x2d=300.0, heaters=[ams("AMS1"), ams("AMS2"), ams("AMS3")])
+    c = eng.circuits["A"]
+
+    def trip_meanwhile(now):
+        c.state, c.lock_at = "LOCKOUT", now  # the watch is in a shot when the decision comes
+
+    w.run(eng, 75, [(T_ASK, ask(eng)), (T_ASK + 0.25, trip_meanwhile)])
+    a = answers(eng)
+    assert a and a[0]["reason"].startswith("Power protection acted on Upstairs meanwhile")
+    assert not offs(eng)
+
+
+def test_refused_when_the_printer_has_no_power():
+    w = Cadence()
+    eng = upstairs(w, x2d=300.0, heaters=[ams("AMS1"), ams("AMS2"), ams("AMS3")])
+    eng.plugs["H2D"].relay = "off"
+    w.run(eng, 75, [(T_ASK, ask(eng))])
+    a = answers(eng)
+    assert a and "plug is off or not answering" in a[0]["reason"]
+    assert not offs(eng)
+
+
+def test_a_paused_plug_that_will_not_turn_on_is_not_asked_forever():
+    w = Cadence()
+    eng = upstairs(w, x2d=400.0, heaters=[ams("AMS1")])
+    w.run(eng, 75, [(T_ASK, ask(eng))])
+    assert [k for k, _ in answers(eng)[0]["paused"]] == ["AMS1"]
+    w.cmd_fail.add("AMS1")  # its "on" commands fail from now on
+    w.run(eng, 3000, start=75.25)
+    tries = [t for t, k in ons(eng) if k == "AMS1"]
+    assert 1 <= len(tries) <= 3, tries
+    told = [d for _, k, d in eng.trace if k == "followup" and d["kind"] == "restore_blocked"]
+    assert told and told[0]["open"] is True and told[0]["shared"] is True
+
+
+def test_a_dry_still_paused_after_30_minutes_is_told_once():
+    """The other printer keeps the circuit too full for the AMS to come back: a person is
+    told once (Start work), the dry stays paused, and the follow-up closes when it is back."""
+    w = Cadence()
+    full = {"w": 400.0}
+    w.add("X2D", lambda t: full["w"], phase=0.5)
+    w.add("H2D", h2d_heats(75), phase=0.0)
+    w.add("AMS1", ams_cycle(), phase=1.0)
+    eng = Engine(w, timers=Timers())
+    eng.add_circuit(CircuitCfg(id="A", name="Upstairs", shed_w=1440.0, restore_w=1080.0,
+                               hard_w=1800.0), [Plug("X2D", "printer"), Plug("H2D", "printer"),
+                                                Plug("AMS1", "ams_ht")])
+    eng.feed_plug("X2D", "printing", 9000, 0)
+    eng.feed_plug("H2D", "idle", None, 0)
+    learned(eng, "AMS1", 148.0)
+    # After the heat up the H2D prints at 250 W next to the X2D at 1,100 W: no room for AMS1.
+    w.run(eng, 2400, [(T_ASK, ask(eng)), (73, lambda now: eng.feed_plug("H2D", "starting", 0, now)),
+                      (200, lambda now: full.update(w=1100.0))])
+    assert not [k for _, k in ons(eng) if k == "AMS1"], "no room: it stays paused"
+    told = [d for _, k, d in eng.trace if k == "followup" and d["kind"] == "restore_blocked"]
+    assert len(told) == 1 and told[0]["open"] is True and told[0]["shared"] is True
+    full["w"] = 300.0  # the X2D finishes: AMS1 comes back, the follow-up closes
+    w.run(eng, 2800, start=2400.25)
+    assert [k for _, k in ons(eng)] == ["AMS1"]
+    closed = [d for _, k, d in eng.trace if k == "followup" and d["kind"] == "restore_blocked"
+              and d["open"] is False]
+    assert closed
+
+
+def test_a_restart_keeps_the_booking_and_the_pause():
+    w = Cadence()
+    eng = upstairs(w, x2d=300.0, heaters=[ams("AMS1"), ams("AMS2"), ams("AMS3")])
+    w.run(eng, 75, [(T_ASK, ask(eng))])
+    paused = sorted(k for k, _ in answers(eng)[0]["paused"])
+    store = eng.to_store(75)
+    assert store["circuits"]["A"]["shares"]["H2D"]["started"] is False
+    # A new engine (Home Assistant restarted) loads the store and the same circuit.
+    w2 = Cadence()
+    eng2 = upstairs(w2, x2d=300.0, heaters=[ams("AMS1"), ams("AMS2"), ams("AMS3")])
+    for k in paused:
+        w2.relay[k] = False  # the plugs really are off
+    eng2.from_store(store, 0.0)
+    assert sorted(k for k, p in eng2.plugs.items() if p.shed_kind == "share") == paused
+    assert "H2D" in eng2.circuits["A"].shares
+    w2.run(eng2, 300)
+    assert not ons(eng2), "the booking still holds the room after the restart"
+
+
+def test_a_stale_feed_does_not_end_the_booking_during_the_heat_up():
+    w = Cadence()
+    eng = upstairs(w, x2d=300.0, h2d=step((0, 40), (80, 1300), (400, 250)),
+                   heaters=[ams("AMS1"), ams("AMS2"), ams("AMS3")])
+    eng.plugs["H2D"].feed.at = -1e9  # its feed says idle, and it is old
+    w.feed_dead = True
+    w.run(eng, 380, [(T_ASK, ask(eng))])
+    assert not kinds(eng, "share_released"), kinds(eng, "share_released")
+    assert not ons(eng), "nothing comes back while the H2D still heats up"

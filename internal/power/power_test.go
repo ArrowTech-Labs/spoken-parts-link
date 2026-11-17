@@ -247,6 +247,7 @@ func TestRunnerForwardsMakeRoomWithItsWatts(t *testing.T) {
 			{ID: "m2", Kind: "make_room", Plug: "00:0d"},
 			{ID: "m3", Kind: "make_room", Plug: "00:0d", NeedW: &bad},
 			{ID: "m4", Kind: "make_room", Plug: "00:0d", NeedW: &need},
+			{ID: "m5", Kind: "make_room", Plug: "00:0d", NeedW: &need, BookedW: &bad},
 		},
 		NextS: 5,
 	}}
