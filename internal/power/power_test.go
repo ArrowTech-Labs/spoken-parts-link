@@ -235,6 +235,46 @@ func TestRunnerSyncConfigRequestsAndJobs(t *testing.T) {
 	}
 }
 
+// Studio Q-73: a make_room request goes to the engine with its watts; one without
+// them, or with a bad value, is dropped (an older link drops every make_room).
+func TestRunnerForwardsMakeRoomWithItsWatts(t *testing.T) {
+	eng := &fakeEngine{}
+	need, booked, bad := 1320.0, 250.0, -5.0
+	a := &fakeAPI{answer: api.PowerSyncResponse{
+		ConfigVersion: 0,
+		Requests: []api.PowerRequest{
+			{ID: "m1", Kind: "make_room", Plug: "00:0d", By: "Kim", NeedW: &need, BookedW: &booked},
+			{ID: "m2", Kind: "make_room", Plug: "00:0d"},
+			{ID: "m3", Kind: "make_room", Plug: "00:0d", NeedW: &bad},
+			{ID: "m4", Kind: "make_room", Plug: "00:0d", NeedW: &need},
+		},
+		NextS: 5,
+	}}
+	now := t0
+	r := newRunner(t, eng, a, &now, "")
+	r.Step(context.Background())
+	var got []map[string]any
+	for i, c := range eng.calls {
+		if c == "spoken_parts_power/command" {
+			got = append(got, eng.data[i]["request"].(map[string]any))
+		}
+	}
+	if len(got) != 2 {
+		t.Fatalf("forwarded %d requests: %+v", len(got), got)
+	}
+	if got[0]["id"] != "m1" || got[0]["kind"] != "make_room" || got[0]["need_w"] != 1320.0 || got[0]["booked_w"] != 250.0 {
+		t.Fatalf("first %+v", got[0])
+	}
+	if got[1]["id"] != "m4" || got[1]["booked_w"] != 0.0 {
+		t.Fatalf("second %+v", got[1])
+	}
+	for _, g := range got {
+		if g["plug"] != "00:0d" {
+			t.Fatalf("plug %+v", g)
+		}
+	}
+}
+
 func TestRunnerQueuesAndUploadsEntries(t *testing.T) {
 	eng := &fakeEngine{}
 	for i := 1; i <= 3; i++ {

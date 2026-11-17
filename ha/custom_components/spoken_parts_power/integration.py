@@ -455,9 +455,13 @@ def _command(rt: PowerRuntime, msg: dict[str, Any]) -> dict[str, Any]:
     vol.Required("type"): "spoken_parts_power/command",
     vol.Required("request"): {
         vol.Required("id"): str,
-        vol.Required("kind"): vol.In(["power_on", "retry"]),
+        vol.Required("kind"): vol.In(["power_on", "retry", "make_room"]),
         vol.Required("plug"): str,
         vol.Optional("by"): str,
+        # Q-73 make room: what the printer's heat up needs, and what other printers on
+        # the circuit have booked (watts, from Spoken Parts).
+        vol.Optional("need_w"): vol.All(vol.Coerce(float), vol.Range(min=0, max=10000)),
+        vol.Optional("booked_w"): vol.All(vol.Coerce(float), vol.Range(min=0, max=10000)),
     },
 })
 @websocket_api.require_admin

@@ -52,6 +52,9 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
 HEATERS = ("ams_ht", "dryer")
+# Q-71: a thermal-magnetic breaker is calibrated at 40 C; at 50 C it carries about 95 %
+# of its rating (BREAKER-RESEARCH.md, ATS-SP-POWER-FIX-1).
+HOT_PANEL_DERATE = 0.95
 ROLES = ("printer", "ams_ht", "dryer", "other")
 PRINTER_STATES = (
     "idle", "finished", "failed", "starting", "printing", "paused", "updating", "unknown",
@@ -114,6 +117,14 @@ class Timers:
     all_clear_s: float = 60.0
     idle_printer_w: float = 60.0
     margin_pct: float = 0.05
+    # Q-73 make room (Marc, Nov 17, 2026): a booking for a printer's heat up ends when
+    # the printer has heated up, or after share_wait_s if it has not started, and at the
+    # latest share_max_s after the pause. A started heat up is over once its draw stays
+    # at half its peak or less for share_low_s.
+    share_wait_s: float = 600.0
+    share_max_s: float = 1800.0
+    share_low_s: float = 30.0
+    share_start_w: float = 400.0  # a rise this big over the draw at the pause is a start
 
 
 @dataclass
@@ -128,10 +139,21 @@ class CircuitCfg:
     hard_w: float = 1800.0
     unmetered_w: float = 0.0
     sustain_s: float = 2.0
+    # Q-71 (Marc, Nov 17, 2026): a breaker panel in a hot space (an attic or a garage in
+    # summer, about 50 C) carries about 5 % less than its rating; the trip model uses
+    # the derated rating. Off (the default) is exactly the model of 0.1.3.
+    hot_panel: bool = False
 
     @property
     def rating_w(self) -> float:
         return float(self.breaker_amps * self.volts)
+
+    @property
+    def trip_rating_w(self) -> float:
+        """The rating the breaker model works from: the rating, or HOT_PANEL_DERATE of it
+        for a hot panel."""
+        r = self.rating_w
+        return r * HOT_PANEL_DERATE if self.hot_panel else r
 
     @property
     def margin_w(self) -> float:
@@ -157,6 +179,7 @@ def validate_circuit(d: dict[str, Any]) -> tuple[CircuitCfg | None, list[str]]:
             hard_w=float(d["hard_w"]),
             unmetered_w=float(d.get("unmetered_w") or 0),
             sustain_s=float(d.get("sustain_s", 2.0)),
+            hot_panel=d.get("hot_panel") is True,
         )
     except (KeyError, TypeError, ValueError):
         return None, [f"circuit {d.get('id')!s}: missing or bad fields"]
@@ -243,6 +266,8 @@ class Plug:
     dry_check_at: float | None = None
     dry_was_w: float = 0.0
     drew_at: float = -1e9  # fix C: last reading of at least restart_dry_w while on
+    share_for: str | None = None  # Q-73: paused to make room for this printer's plug
+    dry_shared: bool = False  # Q-73: its dry check follows a pause for sharing
     stuck: bool = False
     hist: list[float] = field(default_factory=list)  # draws while on and drawing
     idle_hist: list[float] = field(default_factory=list)  # printer draws while idle
@@ -351,6 +376,10 @@ class Circuit:
         self.heat: float | None = None  # breaker model, in trip_heat units
         self.heat_at = 0.0
         self.heat_over = 0.0  # (I/I_rated)^2 - pickup^2 held since the last heat tick
+        # Q-73 make room: the request being decided (after its fresh re-read), and the
+        # room booked for each printer whose start paused heaters (by its plug key).
+        self.share_req: dict[str, Any] | None = None
+        self.shares: dict[str, dict[str, Any]] = {}
 
     # ---- sums ---------------------------------------------------------------------
     @staticmethod
@@ -476,12 +505,19 @@ class Circuit:
         if self.state == "OFF":
             return []
         cands, _ = self.ladder(t)
-        need = max(self.measured(t), self.cfg.rating_w * self.tm.pickup + 1) - self.landing_w
+        need = max(self.measured(t), self.cfg.trip_rating_w * self.tm.pickup + 1) - self.landing_w
         pick, ok = self._prefix(cands, need)
         return [c.plug.key for c in (self._trim(pick, need) if ok else pick)]
 
     # ---- clock ----------------------------------------------------------------------
     def tick(self, t: float) -> None:
+        self._tick(t)
+        # Q-73: only when sharing is in use; otherwise the watch runs exactly as before.
+        if self.share_req is not None or self.shares or any(
+                p.shed_kind == "share" for p in self.plugs.values()):
+            self._share_tick(t)
+
+    def _tick(self, t: float) -> None:
         tm = self.tm
         now_w = self.total(t)
         self._heat_tick(t)
@@ -597,8 +633,10 @@ class Circuit:
         # Did the heater pick its dry back up? (DESIGN 7)
         if p.dry_check_at is not None and t >= p.dry_check_at:
             p.dry_check_at = None
+            shared = {"shared": True} if p.dry_shared else {}
+            p.dry_shared = False
             if p.relay == "on" and p.w < tm.restart_dry_w and p.dry_was_w >= tm.restart_dry_w:
-                self._followup(t, "restart_dry", True, plug=p.key, w=round(p.w, 1))
+                self._followup(t, "restart_dry", True, plug=p.key, w=round(p.w, 1), **shared)
         # Prediction confirmation: the start's draw fell to half its peak for 30 s.
         f = p.feed
         if p.role == "printer" and not f.confirmed and f.start_t is not None:
@@ -649,7 +687,7 @@ class Circuit:
             if not verified_only or self._verified(p, t))
 
     def ratio(self, w: float) -> float:
-        return w / self.cfg.rating_w if self.cfg.rating_w > 0 else 0.0
+        return w / self.cfg.trip_rating_w if self.cfg.trip_rating_w > 0 else 0.0
 
     def _heat_tick(self, t: float) -> None:
         over = self.ratio(self.measured(t)) ** 2 - self.tm.pickup ** 2
@@ -696,7 +734,7 @@ class Circuit:
 
     @property
     def landing_w(self) -> float:
-        return self.cfg.rating_w * self.tm.landing_ratio
+        return self.cfg.trip_rating_w * self.tm.landing_ratio
 
     def _reset_window(self, t: float) -> None:
         self.window_from = t
@@ -827,7 +865,7 @@ class Circuit:
             if ok:
                 pick = self._trim(pick, need)
             else:  # the landing cannot be reached: settle for under the pickup
-                need_h = s_ver - cfg.rating_w * self.tm.pickup
+                need_h = s_ver - cfg.trip_rating_w * self.tm.pickup
                 pick, ok_h = self._prefix(cands, need_h) if need_h > 0 else ([], True)
                 if need_h > 0 and not ok_h:
                     pick, self.outcome = [], "cant_protect"
@@ -929,6 +967,8 @@ class Circuit:
 
     def _hold(self, t: float) -> None:
         cfg, tm, s = self.cfg, self.tm, self.total(t)
+        if self.shares and self.state == "HOLD" and self.waiting():
+            return  # Q-73: room is booked for a printer's heat up; heaters come back after
         if self.state == "OVER":
             if self.under_since is not None and t - self.under_since >= tm.restore_hold_s:
                 self.state = "HOLD"
@@ -1025,6 +1065,191 @@ class Circuit:
             self.state = "HOLD"  # so the restore rules run again
         self._followup(t, "restore_blocked", False, plug=p.key)
         return True, "It comes back by itself when there is room."
+
+    # ---- make room (Q-73) ----------------------------------------------------------------
+    # Marc (Studio Q-73, Nov 17, 2026): "build 'make room' in the power engine, pausing
+    # drying AMS units or dryers for a start, back on after the heat up"; "you don't need
+    # to limit it to 2, pause as many as they need". Spoken Parts asks before it would
+    # hold a send only because the printer's heat up would take the circuit past the
+    # breaker. The engine re-reads every plug, works out how short the circuit is, and
+    # pauses the heaters and dryers the power watch itself would turn off first (the
+    # ladder's first tier: never a printer, never a plug marked "never turn off", never
+    # other equipment), as many as that takes; if all of them would not be enough it
+    # pauses nothing. They come back through a restore once the printer has heated up,
+    # or after share_wait_s if it does not start. A person still sends the file.
+    def make_room(self, t: float, p: Plug, need_w: float, booked_w: float, rid: str,
+                  by: str) -> tuple[bool | None, str]:
+        """None: accepted, answered after the re-read. False: refused now."""
+        if p.role != "printer":
+            return False, "Make room is for a printer."
+        if not self.eng.switching_allowed:
+            return False, "Switching is turned off in Home Assistant, so nothing can be paused."
+        if self.state != "WATCH":
+            return False, (f"Power protection is busy on {self.cfg.name} right now, so nothing "
+                           "was paused.")
+        if self.share_req is not None:
+            return False, "Room is being made for another printer. Try again in a moment."
+        if not (math.isfinite(need_w) and 0 < need_w <= self.tm.max_plug_w) or not (
+                math.isfinite(booked_w) and 0 <= booked_w <= 4 * self.tm.max_plug_w):
+            return False, "The request did not say how much the printer needs."
+        keys = []
+        for q in self.plugs.values():  # step 1: the same fresh re-read as before a printer cut
+            if q.relay == "on" and not q.zeroed and q.reachable:
+                q.read_at = t
+                if self.eng.act.read(q.key, t):
+                    keys.append(q.key)
+        self.share_req = {"id": rid, "by": by, "printer": p.key, "need_w": need_w,
+                          "booked_w": booked_w, "at": t, "keys": keys,
+                          "decide_at": t + self.tm.refresh_timeout_s}
+        self._log(t, "make_room_asked", plug=p.key, request=rid, by=by, need_w=round(need_w),
+                  booked_w=round(booked_w), reread=keys)
+        return None, "Making room."
+
+    def _share_tick(self, t: float) -> None:
+        r = self.share_req
+        if r is not None:
+            answered = all(self.plugs[k].at >= r["at"] for k in r["keys"] if k in self.plugs
+                           and self.plugs[k].relay == "on" and not self.plugs[k].zeroed)
+            if t >= r["decide_at"] or answered:
+                self.share_req = None
+                p = self.plugs.get(r["printer"])
+                if p is None:
+                    self._share_answer(t, r, False, "That printer's plug is not on this circuit any more.")
+                elif self.state != "WATCH" or not self.eng.switching_allowed:
+                    self._share_answer(t, r, False, (
+                        f"Power protection acted on {self.cfg.name} meanwhile, so nothing was "
+                        "paused."))
+                else:
+                    self._share_decide(t, r, p)
+        for key, b in list(self.shares.items()):
+            why = self._share_over(t, key, b)
+            if why:
+                del self.shares[key]
+                self._log(t, "share_released", plug=key, why=why,
+                          held_s=round(t - b["since"]), started=b["started"])
+        if self.state == "WATCH" and self.share_req is None and self.eng.switching_allowed:
+            self._share_back(t)
+
+    def _share_answer(self, t: float, r: dict[str, Any], ok: bool, reason: str,
+                      **data: Any) -> None:
+        self.eng._entry(t, "request_done" if ok else "request_refused", self.cfg.id,
+                        r["printer"], self.event or None,
+                        {"request": r["id"], "kind": "make_room", "by": r["by"],
+                         "reason": reason, **data})
+
+    def _share_decide(self, t: float, r: dict[str, Any], p: Plug) -> None:
+        tm = self.tm
+        s = self.total(t)
+        # A heater between pulses of its session counts at its learned draw (fix C).
+        cycling = sum(max(0.0, q.learned_w - self.eff(q, t)) for q in self.plugs.values()
+                      if self.in_session(q, t))
+        own = self.eff(p, t)
+        after = s + cycling - own + r["need_w"] + r["booked_w"]
+        limit = self.cfg.trip_rating_w * tm.pickup  # the breaker's full rating (Q-50)
+        short = after - limit
+        cands = [c for c in self.ladder(t, 1)[0] if c.tier == 1]
+        numbers = {"sum": round(s), "cycling": round(cycling), "printer_w": round(own),
+                   "need_w": round(r["need_w"]), "booked_w": round(r["booked_w"]),
+                   "after": round(after), "limit": round(limit), "short": round(short),
+                   "may_pause": [[c.plug.key, round(c.w)] for c in cands]}
+        if short <= 0:
+            self._log(t, "make_room", plug=p.key, request=r["id"], outcome="room", paused=[],
+                      **numbers)
+            self._share_answer(t, r, True, "There is room. Nothing was paused.", outcome="room",
+                               paused=[], **numbers)
+            return
+        pick, ok = self._prefix(cands, short)
+        if not ok:
+            freed = round(sum(c.w for c in cands))
+            self._log(t, "make_room", plug=p.key, request=r["id"], outcome="no_room", paused=[],
+                      **numbers)
+            self._share_answer(t, r, False, (
+                f"Pausing every drying AMS and dryer on {self.cfg.name} would free only "
+                f"{freed} W, and {round(short)} W are needed. Nothing was paused."),
+                outcome="no_room", paused=[], **numbers)
+            return
+        pick = self._trim(pick, short)
+        for c in pick:
+            q = c.plug
+            q.shed_w = c.w
+            q.zeroed, q.fired_at, q.confirmed_at = True, t, None  # rule 2: zero first, then send
+            q.retried = q.verify_sent = False
+            q.shed_kind, q.shed_at, q.share_for = "share", t, p.key
+            q.blocked_logged, q.booked_until, q.dry_check_at = False, -1e9, None
+        for c in pick:
+            self.eng._send(t, c.plug, "off")
+        paused = [[c.plug.key, round(c.w)] for c in pick]
+        b = self.shares.get(p.key)
+        if b is None:
+            self.shares[p.key] = {"since": t, "w0": own, "was": p.feed.state, "started": False,
+                                  "started_at": None, "peak": 0.0, "low_since": None,
+                                  "request": r["id"]}
+        self._log(t, "make_room", plug=p.key, request=r["id"], outcome="room_made",
+                  paused=paused, freed=round(sum(c.w for c in pick)),
+                  why="the heaters and dryers the power watch would turn off first", **numbers)
+        self._log(t, "share_pause", plug=p.key, plugs=paused, request=r["id"],
+                  sum_after=round(self.total(t)))
+        names = ", ".join(c.plug.label or c.plug.key for c in pick)
+        self._share_answer(t, r, True, f"Made room: paused {names}.", outcome="room_made",
+                           paused=paused, **numbers)
+
+    def _share_over(self, t: float, key: str, b: dict[str, Any]) -> str | None:
+        """Why the room booked for this printer is no longer needed (None: still booked)."""
+        tm = self.tm
+        p = self.plugs.get(key)
+        if p is None:
+            return "printer_gone"
+        if t - b["since"] >= tm.share_max_s:
+            return "too_long"
+        if p.relay != "on" and p.pending != "on":
+            return "printer_off"
+        f = p.feed
+        if not b["started"]:
+            fed = f.state in ("starting", "printing") and (
+                b["was"] not in ("starting", "printing")
+                or (f.start_t is not None and f.start_t >= b["since"]))
+            if fed or p.w >= b["w0"] + tm.share_start_w:
+                b["started"], b["started_at"] = True, t
+            elif t - b["since"] >= tm.share_wait_s:
+                return "not_started"
+            else:
+                return None
+        b["peak"] = max(b["peak"], p.w)
+        if f.state in NOT_PRINTING and t - b["started_at"] >= tm.share_low_s:
+            return "print_ended"
+        if b["peak"] >= b["w0"] + tm.share_start_w and p.w <= b["peak"] / 2:
+            if b["low_since"] is None:
+                b["low_since"] = t
+            elif t - b["low_since"] >= tm.share_low_s:
+                return "heated_up"
+        else:
+            b["low_since"] = None
+        if f.high_until is not None and f.start_t is not None and f.start_t >= b["since"] \
+                and t >= f.high_until:
+            return "heat_up_time_over"
+        return None
+
+    def _share_back(self, t: float) -> None:
+        """Paused heaters come back one at a time once their printer's booking is over,
+        when the hold window has room for them (the watch's restore rule)."""
+        paused = sorted(
+            (p for p in self.plugs.values()
+             if p.shed_kind == "share" and p.relay == "off" and not p.zeroed
+             and not p.failed_open and p.controllable and p.share_for not in self.shares),
+            key=lambda p: (p.shed_at, p.key))
+        if not paused:
+            return
+        p = paused[0]
+        need = p.expected_w(self.tm)
+        hold_max = self.worst(t, self.tm.restore_hold_s)
+        if hold_max + need > self.cfg.target_w:
+            if not p.blocked_logged:
+                p.blocked_logged = True
+                self._log(t, "share_back_blocked", plug=p.key, hold_max=round(hold_max),
+                          needs=round(need), room=round(self.cfg.target_w - hold_max))
+            return
+        self._turn_on(t, p, need, hold_max, self.total(t), "share_back",
+                      paused_for=p.share_for or "", paused_s=round(t - p.shed_at))
 
     # ---- helpers --------------------------------------------------------------------
     def _open_event(self, t: float) -> None:
@@ -1133,7 +1358,7 @@ class Engine:
                     c.pending = CircuitCfg(id=cid, name=c.cfg.name, protect=False,
                                            breaker_amps=c.cfg.breaker_amps, volts=c.cfg.volts,
                                            shed_w=c.cfg.shed_w, restore_w=c.cfg.restore_w,
-                                           hard_w=c.cfg.hard_w)
+                                           hard_w=c.cfg.hard_w, hot_panel=c.cfg.hot_panel)
                     c.drop_after = True
                     continue
                 self._drop_circuit(c, t)
@@ -1258,9 +1483,11 @@ class Engine:
             self.act.read(p.key, t)
 
     def _log_config(self, c: Circuit, t: float) -> None:
+        hot = {"hot_panel": True, "trip_rating_w": round(c.cfg.trip_rating_w)} \
+            if c.cfg.hot_panel else {}
         c._log(t, "circuit_config", protect=c.cfg.protect, plugs=sorted(c.plugs),
                shed_w=c.cfg.shed_w, restore_w=c.cfg.restore_w, hard_w=c.cfg.hard_w,
-               unmetered_w=c.cfg.unmetered_w)
+               unmetered_w=c.cfg.unmetered_w, **hot)
 
     @staticmethod
     def _set_plug(p: Plug, d: dict[str, Any]) -> None:
@@ -1421,6 +1648,10 @@ class Engine:
                         c._followup(t, "restore_blocked", False, plug=key)
                         p.dry_was_w = max(p.shed_w, p.learned_w)
                         p.dry_check_at = t + self.tm.restart_dry_s
+                    elif kind == "share":  # Q-73: did the dry pick up again?
+                        p.dry_was_w = max(p.shed_w, p.learned_w)
+                        p.dry_check_at = t + self.tm.restart_dry_s
+                        p.dry_shared, p.share_for = True, None
                 p.person_on = False
             else:
                 p.booked_until = t
@@ -1462,6 +1693,7 @@ class Engine:
         if state == "on":
             # A person turned it on: it is not the engine's to restore any more.
             p.zeroed, p.shed_kind, p.booked_until = False, None, -1e9
+            p.share_for = None
             p.failed_open = False
             if c and was == "sacrifice":
                 c._followup(t, "sacrificed", False, plug=key, power_back=True)
@@ -1582,6 +1814,17 @@ class Engine:
             ok, reason = c.power_on(t, p)
         elif kind == "retry":
             ok, reason = c.retry(t, p)
+        elif kind == "make_room":  # Q-73: answered after the fresh re-read
+            try:
+                need_w = float(req.get("need_w") or 0)
+                booked_w = float(req.get("booked_w") or 0)
+            except (TypeError, ValueError):
+                need_w, booked_w = 0.0, 0.0
+            ok, reason = c.make_room(t, p, need_w, booked_w, rid, by)
+            if ok is None:
+                self._entry(t, "person", c.cfg.id, key or None, None,
+                            {"request": rid, "kind": kind, "by": by, "answer": "pending"})
+                return {"result": "pending", "reason": reason}
         else:
             ok, reason = False, "Unknown request."
         out = {"result": "done" if ok else "refused", "reason": reason}
@@ -1650,10 +1893,27 @@ class Engine:
                 "box": self.box(c, t),
                 "config_waiting": c.pending is not None,
                 "switching_off": not self.switching_allowed,
+                **self._share_status(c, t),
             })
         return {"circuits": circuits, "plugs": {k: self.plug_status(k, t) for k in self.plugs},
                 "feed_ok": t - self.feed_at <= self.tm.feed_stale_s,
                 "config_version": self.config_version, "errors": self.config_errors}
+
+    @staticmethod
+    def _share_status(c: Circuit, t: float) -> dict[str, Any]:
+        """Q-71 and Q-73, only when in use (the status is otherwise as in 0.1.3)."""
+        out: dict[str, Any] = {}
+        if c.cfg.hot_panel:
+            out["trip_rating_w"] = round(c.cfg.trip_rating_w)
+        paused = sorted(k for k, p in c.plugs.items() if p.shed_kind == "share")
+        if c.shares or paused or c.share_req is not None:
+            out["sharing"] = {
+                "booked": [{"printer": k, "age_s": round(t - b["since"], 1),
+                            "started": b["started"]} for k, b in c.shares.items()],
+                "paused": paused,
+                "deciding": c.share_req is not None,
+            }
+        return out
 
     def plug_status(self, key: str, t: float) -> dict[str, Any]:
         p = self._plug(key)

@@ -29,12 +29,16 @@ type PowerJob struct {
 	Basis      string  `json:"basis"`
 }
 
-// PowerRequest is a person's request for the engine.
+// PowerRequest is a person's request for the engine. NeedW and BookedW come only
+// with a "make_room" request (0.7.4, Studio Q-73): the watts the printer's heat up
+// needs, and the watts other printers on the circuit have booked.
 type PowerRequest struct {
-	ID   string `json:"id"`
-	Kind string `json:"kind"`
-	Plug string `json:"plug"`
-	By   string `json:"by"`
+	ID      string   `json:"id"`
+	Kind    string   `json:"kind"`
+	Plug    string   `json:"plug"`
+	By      string   `json:"by"`
+	NeedW   *float64 `json:"need_w,omitempty"`
+	BookedW *float64 `json:"booked_w,omitempty"`
 }
 
 // PowerSyncResponse is the answer of POST power/sync.

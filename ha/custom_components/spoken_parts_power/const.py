@@ -1,7 +1,7 @@
 """Constants for Spoken Parts Power."""
 
 DOMAIN = "spoken_parts_power"
-VERSION = "0.1.3"
+VERSION = "0.1.4"
 STORE_VERSION = 1
 STORE_KEY = "spoken_parts_power"
 
